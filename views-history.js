@@ -1,6 +1,7 @@
 /* Performance and Activity views. Loaded after app.js. */
 (function () {
   'use strict';
+  BL.ver = BL.ver || {}; BL.ver['views-history'] = 6;
   const A = BL.app, C = BL.core, ui = A.ui, esc = A.esc, money = A.money, smoney = A.smoney, spct = A.spct, pct = A.pct, cls = A.cls, fin = Number.isFinite;
   const S = () => A.S(); const lineChart = A.lineChart;
   const today = () => new Date().toISOString().slice(0, 10);

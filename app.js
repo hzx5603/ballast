@@ -1,6 +1,12 @@
 (function(){
 'use strict';
 const BL=window.BL; const CFG=window.BALLAST_CONFIG||{};
+BL.ver=BL.ver||{}; BL.ver.app=6;
+/* Version tracking. Each file records the release it last changed in. If one of them on your site is older than this file expects, Ballast says which. */
+const RELEASE={n:6,date:'2026-09-20'};
+const REQUIRES={'lib-core':6,'cloud':6,'views-history':6,'boot':6};
+function versionRows(){ const v=BL.ver||{}; const rows=[{file:'app.js',have:RELEASE.n,need:RELEASE.n}]; Object.keys(REQUIRES).forEach(k=>rows.push({file:k+'.js',have:v[k]==null?null:v[k],need:REQUIRES[k]})); rows.forEach(r=>{ r.ok=r.have!=null&&r.have>=r.need; }); return rows; }
+function versionProblems(){ return versionRows().filter(r=>!r.ok); }
 const {fin,num,esc,sum,parseCSV,isIBKR,parseIBKR,safeUrl,csvCell,cleanJson}=BL.core;
 
 /* ------------------------------------------------------------------ *
@@ -159,7 +165,7 @@ function footHtml(){
   const st=persist.status; let line;
   if(persist.mode==='drive') line=st==='saving'||st==='pending'?'Saving to your Google Drive…':st==='error'?'<b class="loss">Could not save to Drive.</b> '+esc(persist.err)+' It will retry on your next change.':st==='blocked'?'<b class="loss">Saving is paused</b> until the problem on the sign-in screen is fixed.':'Saved to your Google Drive'+(persist.pass?', encrypted':'')+'.';
   else line='Saved in this browser only. <button class="link" data-a="go" data-v="data">Set up Drive sync</button>';
-  return line+'<br><span class="muted">Statements are read in your browser and never uploaded.</span>';
+  return line+'<br><span class="muted">Statements are read in your browser and never uploaded.</span><br><span class="muted">Version '+RELEASE.n+' · '+esc(RELEASE.date)+(versionProblems().length?' · <b class="loss">some files are out of date</b>':'')+'</span>';
 }
 function setBadge(){ const f=$('#foot'); if(f) f.innerHTML=footHtml(); }
 
@@ -727,7 +733,7 @@ function vData(){
     '<label>Theme<select class="in" data-c="theme"><option value="auto"'+(st.theme==='auto'?' selected':'')+'>Match device</option><option value="light"'+(st.theme==='light'?' selected':'')+'>Light</option><option value="dark"'+(st.theme==='dark'?' selected':'')+'>Dark</option></select></label></div>'+
     '<h3 style="font-size:14.5px;margin:20px 0 4px">Exchange rates</h3><p class="sub" style="margin-bottom:10px">Value of one unit of each currency in '+esc(state.base)+'. Ballast uses, in this order: a rate you type, the rate in your statement, then market rates. '+(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken()?'<button class="link" data-a="fx-fetch">Fetch current market rates</button>':'')+'</p>'+
     (cur.size?'<div class="form">'+Array.from(cur).map(c=>'<label>1 '+esc(c)+' in '+esc(state.base)+rateNote(c)+'<input class="in" inputmode="decimal" value="'+(state.fx[c]||'')+'" placeholder="required" data-c="fx" data-k="'+esc(c)+'"></label>').join('')+'</div>':'<p class="sub">All your holdings are in '+esc(state.base)+'.</p>')+'</section>'+
-  backupSection()+storageSection();
+  backupSection()+storageSection()+aboutSection();
 }
 
 /* ------------------------------------------------------------------ *
@@ -741,6 +747,7 @@ function showGate(kind,msg){
   else if(kind==='signin') g.innerHTML=box('<p>Sign in with Google to load your data from your own Drive. Nothing is stored on the site itself.</p>'+(msg?'<p class="loss">'+esc(msg)+'</p>':'')+'<div class="row"><button class="btn" data-a="gate-signin">Sign in with Google</button><button class="btn ghost" data-a="gate-local">Use in this browser only</button></div>');
   else if(kind==='unlock') g.innerHTML=box('<p>Your data in Drive is encrypted. Enter your passphrase to open it. It is never sent anywhere or stored.</p><label class="sub" style="display:block;margin:8px 0">Passphrase<input class="in" id="gate-pass" type="password" autocomplete="current-password" style="width:100%;margin-top:4px"></label>'+(msg?'<p class="loss">'+esc(msg)+'</p>':'')+'<div class="row"><button class="btn" data-a="gate-unlock">Unlock</button><button class="btn ghost" data-a="sign-out">Sign out</button></div>');
   else if(kind==='error') g.innerHTML=box('<p class="loss">'+esc(msg||'Something went wrong.')+'</p><p class="sub">Nothing was changed in Drive. Saving is paused so a problem here cannot overwrite your data.</p><div class="row"><button class="btn" data-a="gate-retry">Try again</button><button class="btn ghost" data-a="gate-local">Use in this browser only</button></div>');
+  else if(kind==='version') g.innerHTML=box('<p><b>Some Ballast files on your site are out of date.</b></p><p class="sub" style="margin-bottom:8px">This page is running a mix of old and new files, which can cause wrong numbers or missing screens.</p><table class="t"><thead><tr><th>File</th><th class="num">On your site</th><th class="num">Needed</th></tr></thead><tbody>'+msg.map(r=>'<tr><td>js/'+esc(r.file)+'</td><td class="num loss">'+(r.have==null?'not found or old':esc(r.have))+'</td><td class="num">'+esc(r.need)+'</td></tr>').join('')+'</tbody></table><p class="sub" style="margin:10px 0">Replace those files in your repo\'s js folder, wait for GitHub Pages to finish updating, then reload with Ctrl+Shift+R.</p><div class="row"><button class="btn ghost" data-a="ver-continue">Continue anyway</button></div>');
   const f=g.querySelector('input'); if(f) f.focus();
 }
 function hideGate(){ const g=$('#gate'); if(g){ g.hidden=true; g.innerHTML=''; } }
@@ -796,6 +803,10 @@ function statementsSection(){
   const trackBox=tr&&!state.demo?'<div class="panel" style="margin-bottom:12px"><div class="kv"><span class="muted">Tracked until</span><span><b class="'+(tr.status==='current'?'gain':tr.status==='overdue'?'loss':'')+'"'+(tr.status==='due'?' style="color:var(--flag)"':'')+'>'+esc(BL.core.fmtDay(tr.through))+'</b> <span class="muted">('+esc(BL.core.agoText(tr.days))+')</span></span></div><div class="kv"><span class="muted">Statements start</span><span>'+esc(BL.core.fmtDay(tr.since))+'</span></div>'+(tr.latestTx?'<div class="kv"><span class="muted">Latest transaction</span><span>'+esc(BL.core.fmtDay(tr.latestTx))+'</span></div>':'')+'<div class="kv"><span class="muted">Next to import</span><span>'+(tr.status==='current'?'Nothing due yet. The next one starts ':'The statement starting ')+'<b>'+esc(BL.core.fmtDay(tr.next.from))+'</b> <span class="muted">('+esc(tr.next.desc)+')</span></span></div></div>':'';
   return '<section class="sec"><div class="sec-head"><h2>Statements imported</h2>'+(cov.first?'<span class="sub">Covers '+esc(BL.core.fmtDay(cov.first))+' to '+esc(BL.core.fmtDay(cov.last))+(cov.gaps.length?', '+cov.gaps.length+' gap'+(cov.gaps.length>1?'s':''):'')+'. <button class="link" data-a="go" data-v="performance">See coverage</button></span>':'')+'</div>'+trackBox+
     (state.snaps.length?'<div class="scroll"><table class="t"><thead><tr><th>Statement</th><th>Period</th><th class="num">Net asset value</th><th class="num">Positions</th><th class="num">Transactions</th><th>Checks</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>':'<p class="sub">None yet.</p>')+nav+'</section>';
+}
+function aboutSection(){
+  const rows=versionRows();
+  return '<section class="sec"><div class="sec-head"><h2>About this copy</h2><span class="sub">Version '+RELEASE.n+', '+esc(RELEASE.date)+'</span></div><div class="scroll"><table class="t"><thead><tr><th>File</th><th class="num">Version found</th><th class="num">Needed</th><th></th></tr></thead><tbody>'+rows.map(r=>'<tr><td>js/'+esc(r.file)+'</td><td class="num">'+(r.have==null?'not found':esc(r.have))+'</td><td class="num">'+esc(r.need)+'</td><td>'+(r.ok?'<span class="gain">OK</span>':'<span class="loss">Out of date, replace it</span>')+'</td></tr>').join('')+'</tbody></table></div><p class="sub" style="margin-top:8px;max-width:78ch">If a row says out of date, replace that file in your repo\'s js folder, wait for GitHub Pages to update (its Actions tab shows a green tick), and reload with Ctrl+Shift+R. The other script files are not tracked here.</p></section>';
 }
 function backupSection(){
   return '<section class="sec"><div class="sec-head"><h2>Backup, export and reset</h2></div><div class="row"><button class="btn ghost" data-a="export-backup-enc">Save encrypted backup</button><button class="btn ghost" data-a="export-backup">Save plain backup</button><button class="btn ghost" data-a="export-csv">Holdings CSV</button><button class="btn ghost" data-a="export-ledger">Transactions CSV</button><button class="btn ghost" data-a="export-nav">NAV history CSV</button><button class="btn ghost" data-a="print">Print or save as PDF</button><button class="btn danger" data-a="wipe">Delete all data</button></div><p class="sub" style="margin-top:8px;max-width:74ch">A plain backup contains your full holdings and history, so keep it somewhere private or use the encrypted one. To restore, drop the file into the import area above.</p></section>';
@@ -883,6 +894,7 @@ async function restorePrev(){
 }
 const EXTRA_ACTIONS={
   tk:el=>{ ui.tk=el.dataset.v; render(); },
+  'ver-continue':()=>{ ui.verIgnored=true; hideGate(); BL.app.boot(); },
   'fx-fetch':async()=>{ try{ const n=await fetchRates(true); toast(n?'Exchange rates updated':'No rates were returned'); }catch(e){ toast(e.message); } render(true); },
   'gate-signin':async()=>{ try{ showGate('busy','Waiting for Google…'); await BL.cloud.signIn(); await afterSignIn(); }catch(e){ showGate('signin',e.message); } },
   'gate-local':()=>{ persist.mode='local'; persist.blocked=false; state=load(); ledgerMemo=perfMemo=memo=null; hideGate(); applyTheme(); render(); setBadge(); },
@@ -1194,9 +1206,10 @@ document.addEventListener('input',e=>{
  * ------------------------------------------------------------------ */
 BL.app={S:()=>state,ui:ui,M:M,getLedger:getLedger,getPerf:getPerf,fxRate:fxRate,exposure:exposure,calcBuckets:calcBuckets,esc:esc,money:money,smoney:smoney,pct:pct,spct:spct,cls:cls,px:px,qtyFmt:qtyFmt,nf0:nf0,fdate:fdate,ago:ago,empty:empty,hbars:hbars,strip:strip,diverge:diverge,lineChart:lineChart,catColor:catColor,
   toast:toast,openDlg:openDlg,closeDlg:closeDlg,go:go,render:render,dirty:dirty,saveFile:saveFile,ACT:ACT,VIEW:VIEW,TK:TK,isDeriv:isDeriv,findPos:findPos,aiOn:aiOn,allNews:allNews,matchItem:matchItem,sevOf:sevOf,persist:persist,$:$,$$:$$,slug:slug,MINUS:MINUS,yahooGuess:yahooGuess,
-  onboarding:onboarding,warningsNote:staleNote};
+  onboarding:onboarding,warningsNote:staleNote,versionProblems:versionProblems,versionRows:versionRows,RELEASE:RELEASE};
 BL.app.boot=async function(){
   try{ if(window.top!==window.self){ document.body.textContent='For your security Ballast will not run inside another page.'; return; } }catch(e){ document.body.textContent='For your security Ballast will not run inside another page.'; return; }
+  const stale=versionProblems(); if(stale.length&&!ui.verIgnored){ showGate('version',stale); setBadge(); return; }
   applyTheme(); render(); setBadge();
   if(BL.cloud.configured()&&!CFG.PREVIEW) await cloudGate();
 };

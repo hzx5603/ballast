@@ -8,6 +8,7 @@
 (function (root) {
   'use strict';
   const BL = root.BL = root.BL || {};
+  BL.ver = BL.ver || {}; BL.ver.cloud = 6;
   // Two separate tokens on purpose. The Drive token only ever goes to Google. The identity token has no access to
   // any Google data and is the only thing the Worker ever sees.
   const SCOPES = { drive: 'https://www.googleapis.com/auth/drive.file', id: 'https://www.googleapis.com/auth/userinfo.email' };

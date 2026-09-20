@@ -8,6 +8,7 @@
 (function (root) {
   'use strict';
   const BL = root.BL = root.BL || {};
+  BL.ver = BL.ver || {}; BL.ver['lib-core'] = 6; // release this file last changed in; app.js checks it
   const fin = Number.isFinite;
 
   /* ---------------------------------------------------------------- utils */
