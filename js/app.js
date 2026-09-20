@@ -1,10 +1,10 @@
 (function(){
 'use strict';
 const BL=window.BL; const CFG=window.BALLAST_CONFIG||{};
-BL.ver=BL.ver||{}; BL.ver.app=8;
+BL.ver=BL.ver||{}; BL.ver.app=9;
 /* Version tracking. Each file records the release it last changed in. If one of them on your site is older than this file expects, Ballast says which. */
-const RELEASE={n:8,date:'2026-09-20'};
-const REQUIRES={'lib-core':8,'cloud':6,'views-history':8,'boot':6};
+const RELEASE={n:9,date:'2026-09-20'};
+const REQUIRES={'lib-core':9,'cloud':6,'views-history':8,'boot':6};
 function versionRows(){ const v=BL.ver||{}; const rows=[{file:'app.js',have:RELEASE.n,need:RELEASE.n}]; Object.keys(REQUIRES).forEach(k=>rows.push({file:k+'.js',have:v[k]==null?null:v[k],need:REQUIRES[k]})); rows.forEach(r=>{ r.ok=r.have!=null&&r.have>=r.need; }); return rows; }
 function versionProblems(){ return versionRows().filter(r=>!r.ok); }
 const {fin,num,esc,sum,parseCSV,isIBKR,parseIBKR,safeUrl,csvCell,cleanJson}=BL.core;
@@ -109,7 +109,7 @@ const flagSvg=on=>'<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="
  * State
  * ------------------------------------------------------------------ */
 function blank(){
-  return {v:2,base:'USD',fx:{},fxImplied:{},fxSrc:{},positions:[],cash:[],snaps:[],navExtra:[],asOf:'',asOfLabel:'',stmtNav:null,demo:false,
+  return {v:2,base:'USD',fx:{},fxImplied:{},fxSrc:{},positions:[],cash:[],snaps:[],navExtra:[],asOf:'',asOfLabel:'',stmtNav:null,accr:0,demo:false,
     tg:{regionProfile:'Global market weight',clsProfile:'Growth',region:Object.assign({},REGION_PROFILES['Global market weight']),cls:Object.assign({},CLASS_PROFILES.Growth)},
     watch:[],feed:null,newsManual:[],ai:{},
     src:{custom:[],indices:DEFAULT_INDICES.map(x=>Object.assign({},x)),queries:[],days:7},
@@ -200,9 +200,9 @@ function M(){
     return Object.assign({},p,{live:lp!=null,px:price,r:r,nat:nat,val:val,pnl:pnl,pnlPct:hasCost&&p.cost?(nat-p.cost)/Math.abs(p.cost)*100:NaN});
   });
   const cash=state.cash.map(c=>{ const r=fxRate(c.ccy); if(r==null) missing.add(c.ccy); return Object.assign({},c,{val:c.amount*(r==null?1:r)}); });
-  const inv=sum(rows,r=>r.val), cashV=sum(cash,c=>c.val), nav=inv+cashV;
+  const inv=sum(rows,r=>r.val), cashV=sum(cash,c=>c.val), nav=inv+cashV, accr=state.accr>0?state.accr:0;
   rows.forEach(r=>{ r.w=nav?r.val/nav*100:0; });
-  memo={rows:rows,cash:cash,inv:inv,cashV:cashV,nav:nav,missing:Array.from(missing)};
+  memo={rows:rows,cash:cash,inv:inv,cashV:cashV,nav:nav,accr:accr,total:nav+accr,missing:Array.from(missing)};
   return memo;
 }
 function dirty(){ memo=null; ledgerMemo=null; perfMemo=null; save(); }
@@ -280,7 +280,7 @@ function adoptHoldings(r){
   if(r.base) { if(r.base!==state.base){ state.fx={}; state.fxImplied={}; state.fxSrc={}; } state.base=r.base; }
   Object.keys(r.fx||{}).forEach(c=>setRate(c,r.fx[c],'statement'));
   state.positions=r.positions.filter(p=>p.symbol&&fin(p.qty)).map(p=>buildPosition(p,r.info,old[p.symbol+'|'+p.ccy]));
-  state.cash=r.cash; state.asOf=r.key; state.asOfLabel=r.label; state.stmtNav=fin(r.nav)?r.nav:null; state.demo=false;
+  state.cash=r.cash; state.asOf=r.key; state.asOfLabel=r.label; state.stmtNav=fin(r.nav)?r.nav:null; state.accr=fin(r.accruals)?r.accruals:0; state.demo=false;
   solveFx(r.nav);
 }
 function solveFx(target){
@@ -314,12 +314,15 @@ function setRate(c,v,src,force){
   if(!(v>0)||!fin(v)||c===state.base) return false; const cur=rateSrc(c);
   if(cur==='manual') return false;
   if(!force){
-    if(src==='market'&&cur&&!state.set.live) return false;       // statement view: keep the statement's own rates
-    if(src==='statement'&&cur==='market'&&state.set.live) return false;
+    const live=liveInUse();
+    if(src==='market'&&cur&&!live) return false;                 // statement view: keep the statement's own rates
+    if(src==='statement'&&cur==='market'&&live) return false;
     if(src==='implied'&&(cur==='statement'||cur==='market')) return false;
   }
   state.fx[c]=+(+v).toPrecision(6); state.fxImplied[c]=true; state.fxSrc[c]=src; return true;
 }
+/** True only when live prices are switched on AND the feed actually holds quotes, so rates and prices come from the same place. */
+function liveInUse(){ return !!(state.set.live&&state.feed&&state.feed.quotes&&Object.keys(state.feed.quotes).length); }
 function rateNote(c){ const s=rateSrc(c); return s==='statement'?' (from your statement)':s==='market'?' (market rate)':s==='implied'?' (worked out from your statement total)':''; }
 /** Live rates through the market data service. It returns units of each currency per 1 USD, so base-per-unit is (base per USD) / (c per USD). */
 async function fetchRates(force){
@@ -491,7 +494,7 @@ function warnings(m){
   if(state.demo) w.push('<div class="banner info">You are looking at sample data. <button class="link" data-a="clear-demo">Clear it</button> before importing your own statement.</div>');
   if(m.missing.length) w.push('<div class="banner"><b>Totals are wrong until exchange rates are set.</b> There is no rate for '+esc(m.missing.join(', '))+', so those holdings are being counted as if 1 unit equalled 1 '+esc(state.base)+'. '+(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken()?'<button class="link" data-a="fx-fetch">Fetch current rates</button> or ':'')+'<button class="link" data-a="go" data-v="data">enter them yourself</button>.</div>');
   const anyLive=m.rows.some(r=>r.live);
-  if(fin(state.stmtNav)&&!anyLive&&!state.demo&&m.nav){ const d=Math.abs(m.nav-state.stmtNav)/Math.abs(state.stmtNav); if(d>0.015) w.push('<div class="banner">Holdings plus cash add up to '+money(m.nav)+' but the statement reports '+money(state.stmtNav)+' ('+pct(d*100)+' apart). Usual causes are exchange rates, cash held in a currency the report omits, or accrued interest.</div>'); }
+  if(fin(state.stmtNav)&&!anyLive&&!state.demo&&m.nav){ const d=Math.abs(m.total-state.stmtNav)/Math.abs(state.stmtNav); if(d>0.015) w.push('<div class="banner">Holdings, cash and accrued income add up to '+money(m.total)+' but the statement reports '+money(state.stmtNav)+' ('+pct(d*100)+' apart). Usual causes are exchange rates, cash held in a currency the report omits, or accrued interest.</div>'); }
   const g=state.positions.filter(p=>p.auto&&p.cls==='Equity').length;
   if(g) w.push('<div class="banner info">'+g+' equity holding'+(g>1?'s have':' has')+' a region guessed from its currency or exchange (marked ? in Holdings). Review them so your regional mix is right.</div>');
   if(state.feed&&state.feed.generated_at&&(Date.now()-new Date(state.feed.generated_at).getTime())>3*864e5) w.push('<div class="banner info">Your market feed is from '+ago(state.feed.generated_at)+'. Run the scraper again for fresh prices and news.</div>');
@@ -523,7 +526,7 @@ function vOverview(){
   const top=m.rows.slice().sort((a,b)=>b.val-a.val).slice(0,8).map(r=>({label:r.symbol,v:r.w,color:r.flag?'var(--flag)':null}));
   const scaleNote=ui.dim==='region'?'Equities only, with global and broad emerging funds split by their approximate look-through weights.':ui.dim==='sector'?'Equities only.':'';
   return warnings(m)+
-  '<section class="sec"><div class="nav-val">'+money(m.nav)+'</div><div class="sub" style="margin-top:4px">'+trackedSub()+(m.rows.some(r=>r.live)?', prices updated from your feed':'')+'</div>'+
+  '<section class="sec"><div class="nav-val">'+money(m.total)+'</div><div class="sub" style="margin-top:4px">'+trackedSub()+(m.rows.some(r=>r.live)?', prices updated from your feed':'')+(m.accr>=1?'. Includes '+money(m.accr)+' of accrued dividends and interest, as your statement does':'')+'</div>'+
     (monthLine?'<div style="margin-top:4px">'+monthLine+'</div>':'')+
     '<div class="stats"><div><span class="lab">Invested</span><b>'+money(m.inv)+'</b></div><div><span class="lab">Cash</span><b>'+money(m.cashV)+'</b></div>'+
     '<div><span class="lab">Unrealized gain</span><b class="'+cls(pnl)+'">'+smoney(pnl)+(cost>0?' ('+spct(pnl/cost*100)+')':'')+'</b></div><div><span class="lab">Positions</span><b>'+m.rows.length+'</b></div></div></section>'+
@@ -879,7 +882,7 @@ async function refreshFeed(){
 function overviewLine(){
   const p=getPerf(); if(p.series.length<2) return ''; const parts=[];
   if(fin(p.gain)&&fin(p.contributions)&&p.contributions>0){
-    const m=M(); const diff=fin(p.nav)&&m.nav?Math.abs(p.nav-m.nav):0;
+    const m=M(); const diff=fin(p.nav)&&m.total?Math.abs(p.nav-m.total):0;
     parts.push('<span class="'+cls(p.gain)+'">'+smoney(p.gain)+' gain on '+money(p.contributions)+' put in</span>'+(diff>=1?'<span class="muted"> (worked out from the statement value of '+money(p.nav)+', which includes accrued dividends and interest that are not in the holdings and cash above)</span>':''));
   }
   if(fin(p.totalTwr)&&p.verifiedDays>0) parts.push('<span class="muted">'+(p.coarse?'approximate return ':'time-weighted return ')+spct(p.totalTwr*100)+(fin(p.annualised)?', about '+spct(p.annualised*100)+' a year':'')+'</span>');
@@ -1178,7 +1181,7 @@ const ACT={
     const defCcy=($('#g-ccy').value||state.base).toUpperCase(); const d=$('#g-date').value||new Date().toISOString().slice(0,10);
     const list=generatePositions(g,map,defCcy); if(!list.length){ toast('No usable rows found'); return; }
     const old={}; state.positions.forEach(p=>{ old[p.id]=p; });
-    state.positions=list.map(r=>buildPosition(r,{},old[r.symbol+'|'+r.ccy])); state.cash=[]; state.asOf=d; state.asOfLabel=fdate(d); state.stmtNav=null; state.demo=false;
+    state.positions=list.map(r=>buildPosition(r,{},old[r.symbol+'|'+r.ccy])); state.cash=[]; state.asOf=d; state.asOfLabel=fdate(d); state.stmtNav=null; state.accr=0; state.demo=false;
     ui.gen=null; ui.log=[{ok:true,msg:'Imported '+list.length+' positions from '+g.name+'. Add any cash balance in Settings if needed.'}]; dirty(); go('overview'); toast('Imported '+list.length+' positions'); },
   'pos-add':()=>{ const sym=$('#m-sym').value.trim(),qty=num($('#m-qty').value),price=num($('#m-px').value); if(!sym||!fin(qty)||!fin(price)){ toast('Symbol, quantity and price are required'); return; }
     const ccy=($('#m-ccy').value||state.base).toUpperCase(); const cost=num($('#m-cost').value);
@@ -1212,7 +1215,7 @@ document.addEventListener('change',e=>{
   else if(c==='set'){ const v=num(el.value); if(fin(v)&&v>0){ state.set[el.dataset.k]=v; dirty(); render(true); } }
   else if(c==='theme'){ state.set.theme=el.value; applyTheme(); dirty(); }
   else if(c==='fx'){ const v=num(el.value); const k=el.dataset.k; if(v>0){ state.fx[k]=v; delete state.fxImplied[k]; delete state.fxSrc[k]; } else { delete state.fx[k]; delete state.fxImplied[k]; delete state.fxSrc[k]; } dirty(); render(true); }
-  else if(c==='base'){ const b=el.value.trim().toUpperCase(); if(/^[A-Z]{3}$/.test(b)&&b!==state.base){ state.base=b; state.fx={}; state.fxImplied={}; state.fxSrc={}; state.stmtNav=null; dirty(); render(true); toast('Base currency changed. Set your exchange rates below.'); } }
+  else if(c==='base'){ const b=el.value.trim().toUpperCase(); if(/^[A-Z]{3}$/.test(b)&&b!==state.base){ state.base=b; state.fx={}; state.fxImplied={}; state.fxSrc={}; state.stmtNav=null; state.accr=0; dirty(); render(true); toast('Base currency changed. Set your exchange rates below.'); } }
 });
 document.addEventListener('input',e=>{
   const el=e.target; if(!el.dataset.i) return;

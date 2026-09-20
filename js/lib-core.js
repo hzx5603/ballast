@@ -8,7 +8,7 @@
 (function (root) {
   'use strict';
   const BL = root.BL = root.BL || {};
-  BL.ver = BL.ver || {}; BL.ver['lib-core'] = 8; // release this file last changed in; app.js checks it
+  BL.ver = BL.ver || {}; BL.ver['lib-core'] = 9; // release this file last changed in; app.js checks it
   const fin = Number.isFinite;
 
   /* ---------------------------------------------------------------- utils */
@@ -114,7 +114,7 @@
   /* ---- cleaned statement copies ---------------------------------------------------------------------------------------------------
    * Keeps only the sections and columns Ballast reads, with identity columns blanked and free text tidied, so the statement can be re-read later
    * (for example after an improvement to the parser) without asking for the file again. It is a whitelist: anything not listed is dropped. */
-  const PARSER_VERSION = 2;
+  const PARSER_VERSION = 3;
   const KEEP_SECTIONS = new Set(['Statement', 'Account Information', 'Net Asset Value', 'Change in NAV', 'Open Positions', 'Cash Report', 'Forex Balances', 'Trades', 'Deposits & Withdrawals', 'Dividends', 'Withholding Tax', 'Interest', 'Fees', 'Corporate Actions', 'Financial Instrument Information']);
   const PII_COL = /^(account|acct|address|alias|customer|holder|user|e-?mail|phone|street|city|postal|zip|name)\b/i;
   const csvQ = v => { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
@@ -141,7 +141,7 @@
 
   function parseIBKR(text) {
     const rows = parseCSV(String(text).replace(/^\uFEFF/, '')); const hdr = {};
-    const out = { base: null, from: '', to: '', key: '', label: '', period: '', positions: [], cash: [], nav: NaN, navPrior: NaN, change: {}, twrStmt: NaN, ledger: [], info: {}, fx: {}, sections: {} };
+    const out = { base: null, from: '', to: '', key: '', label: '', period: '', positions: [], cash: [], nav: NaN, navPrior: NaN, change: {}, twrStmt: NaN, ledger: [], info: {}, fx: {}, accruals: 0, sections: {} };
     const tradesOrder = [], tradesExec = [];
     for (const r of rows) {
       const sec = r[0], kind = r[1];
@@ -153,6 +153,7 @@
         case 'Account Information': if (o['Field Name'] === 'Base Currency') out.base = (o['Field Value'] || '').trim(); break; // name, account id and address are deliberately ignored
         case 'Net Asset Value':
           if ((o['Asset Class'] || '').trim() === 'Total') { out.nav = num(o['Current Total'] != null ? o['Current Total'] : o['Current Long']); out.navPrior = num(o['Prior Total']); }
+          else if (/accrual/i.test(o['Asset Class'] || '')) { const a = num(o['Current Total'] != null ? o['Current Total'] : o['Current Long']); if (fin(a)) out.accruals += a; } // accrued dividends and interest are part of the statement's net asset value
           else if (o['Time Weighted Rate of Return'] != null && fin(num(o['Time Weighted Rate of Return']))) out.twrStmt = num(o['Time Weighted Rate of Return']);
           break;
         case 'Change in NAV':
@@ -278,7 +279,7 @@
     const c = r.change || {};
     return { key: r.key, from: r.from, to: r.to || r.key, label: r.label, base: r.base || fallbackBase, nav: r.nav,
       navStart: fin(c['Starting Value']) ? c['Starting Value'] : r.navPrior, change: c, twrStmt: r.twrStmt,
-      n: r.positions.length, ledger: r.ledger, raw: r.raw || '', pv: PARSER_VERSION, sections: Object.keys(r.sections || {}).filter(s => ['Open Positions', 'Trades', 'Deposits & Withdrawals', 'Dividends', 'Cash Report', 'Change in NAV', 'Net Asset Value'].includes(s)) };
+      n: r.positions.length, ledger: r.ledger, raw: r.raw || '', pv: PARSER_VERSION, accr: fin(r.accruals) ? r.accruals : 0, sections: Object.keys(r.sections || {}).filter(s => ['Open Positions', 'Trades', 'Deposits & Withdrawals', 'Dividends', 'Cash Report', 'Change in NAV', 'Net Asset Value'].includes(s)) };
   }
   /** Sanity checks on an imported statement. Returns list of {level:'ok'|'warn', msg}. */
   function checkSnap(s) {
