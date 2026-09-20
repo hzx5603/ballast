@@ -103,7 +103,7 @@ const flagSvg=on=>'<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="
  * State
  * ------------------------------------------------------------------ */
 function blank(){
-  return {v:2,base:'USD',fx:{},fxImplied:{},positions:[],cash:[],snaps:[],navExtra:[],asOf:'',asOfLabel:'',stmtNav:null,demo:false,
+  return {v:2,base:'USD',fx:{},fxImplied:{},fxSrc:{},positions:[],cash:[],snaps:[],navExtra:[],asOf:'',asOfLabel:'',stmtNav:null,demo:false,
     tg:{regionProfile:'Global market weight',clsProfile:'Growth',region:Object.assign({},REGION_PROFILES['Global market weight']),cls:Object.assign({},CLASS_PROFILES.Growth)},
     watch:[],feed:null,newsManual:[],ai:{},
     src:{custom:[],indices:DEFAULT_INDICES.map(x=>Object.assign({},x)),queries:[],days:7},
@@ -128,13 +128,14 @@ function normalise(b){
   ['positions','cash','watch','newsManual','navExtra'].forEach(k=>{ if(!Array.isArray(b[k])) b[k]=[]; });
   b.navExtra=b.navExtra.filter(x=>x&&fin(x.nav)&&/^\d{4}-\d{2}-\d{2}$/.test(x.date));
   if(!b.set||typeof b.set!=='object') b.set=blank().set;
+  if(!b.fxSrc||typeof b.fxSrc!=='object') b.fxSrc={};
   return b;
 }
 function merge(b,s){
   if(!s||typeof s!=='object'||Array.isArray(s)) return b;
   s=cleanJson(s);
   for(const k of Object.keys(s)){
-    if(['tg','src','set','fx','fxImplied','ai','goal'].includes(k)&&s[k]&&typeof s[k]==='object'&&!Array.isArray(s[k])) b[k]=Object.assign(b[k]||{},s[k]);
+    if(['tg','src','set','fx','fxImplied','fxSrc','ai','goal'].includes(k)&&s[k]&&typeof s[k]==='object'&&!Array.isArray(s[k])) b[k]=Object.assign(b[k]||{},s[k]);
     else if(Array.isArray(b[k])&&!Array.isArray(s[k])) continue;
     else b[k]=s[k];
   }
@@ -270,8 +271,8 @@ function buildPosition(raw,info,old){
 }
 function adoptHoldings(r){
   const old={}; state.positions.forEach(p=>{ old[p.id]=p; });
-  if(r.base) { if(r.base!==state.base){ state.fx={}; state.fxImplied={}; } state.base=r.base; }
-  Object.keys(r.fx||{}).forEach(c=>{ if(!(state.fx[c]>0)||state.fxImplied[c]){ state.fx[c]=+r.fx[c].toPrecision(6); state.fxImplied[c]=true; } });
+  if(r.base) { if(r.base!==state.base){ state.fx={}; state.fxImplied={}; state.fxSrc={}; } state.base=r.base; }
+  Object.keys(r.fx||{}).forEach(c=>setRate(c,r.fx[c],'statement'));
   state.positions=r.positions.filter(p=>p.symbol&&fin(p.qty)).map(p=>buildPosition(p,r.info,old[p.symbol+'|'+p.ccy]));
   state.cash=r.cash; state.asOf=r.key; state.asOfLabel=r.label; state.stmtNav=fin(r.nav)?r.nav:null; state.demo=false;
   solveFx(r.nav);
@@ -282,8 +283,36 @@ function solveFx(target){
   const foreign=Object.keys(amt).filter(c=>c!==state.base&&Math.abs(amt[c])>0);
   if(foreign.length===1&&fin(target)){
     const c=foreign[0]; const rate=(target-(amt[state.base]||0))/amt[c];
-    if(rate>0&&fin(rate)&&!(state.fx[c]>0&&!state.fxImplied[c])){ state.fx[c]=+rate.toPrecision(6); state.fxImplied[c]=true; }
+    if(rate>0&&fin(rate)) setRate(c,rate,'implied');
   }
+}
+/* Exchange rates. state.fx[c] is the value of ONE unit of currency c in the base currency (1 USD = 1.28 SGD gives fx.USD = 1.28).
+ * Where a rate came from is kept in state.fxSrc: manual (typed by you), statement (the statement's own closing rate), market (a live rate),
+ * implied (worked backwards from the statement total). A rate you typed is never replaced automatically. */
+function rateSrc(c){ if(!(state.fx[c]>0)) return ''; return (state.fxSrc&&state.fxSrc[c])||(state.fxImplied[c]?'implied':'manual'); }
+function setRate(c,v,src,force){
+  if(!(v>0)||!fin(v)||c===state.base) return false; const cur=rateSrc(c);
+  if(cur==='manual') return false;
+  if(!force){
+    if(src==='market'&&cur&&!state.set.live) return false;       // statement view: keep the statement's own rates
+    if(src==='statement'&&cur==='market'&&state.set.live) return false;
+    if(src==='implied'&&(cur==='statement'||cur==='market')) return false;
+  }
+  state.fx[c]=+(+v).toPrecision(6); state.fxImplied[c]=true; state.fxSrc[c]=src; return true;
+}
+function rateNote(c){ const s=rateSrc(c); return s==='statement'?' (from your statement)':s==='market'?' (market rate)':s==='implied'?' (worked out from your statement total)':''; }
+/** Live rates through the market data service. It returns units of each currency per 1 USD, so base-per-unit is (base per USD) / (c per USD). */
+async function fetchRates(force){
+  if(!(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken())) throw new Error('Allow market data first (Data & settings, Storage and security).');
+  const used=new Set(state.positions.map(p=>p.ccy).concat(state.cash.map(c=>c.ccy))); used.delete(state.base); const list=Array.from(used).filter(c=>/^[A-Z]{3}$/.test(c));
+  if(!list.length) return 0;
+  const r=await BL.cloud.api('/fx',{currencies:list.concat([state.base])}); const per=r&&r.fx_per_usd;
+  if(!per||!(per[state.base]>0)) throw new Error('The service did not return a rate for '+state.base+'.');
+  let n=0; list.forEach(c=>{ if(per[c]>0&&setRate(c,per[state.base]/per[c],'market',!!force)) n++; });
+  if(n) dirty(); return n;
+}
+async function autoRates(){
+  try{ if(!BL.cloud.apiConfigured()||!BL.cloud.hasIdToken()) return; memo=null; if(!M().missing.length) return; if(await fetchRates(false)){ toast('Exchange rates fetched'); render(true); } }catch(e){}
 }
 function ingest(list){
   list.sort((a,b)=>a.key>b.key?1:a.key<b.key?-1:0);
@@ -330,7 +359,7 @@ function importFeed(o){
   if(!o||typeof o!=='object'||!('quotes' in o||'news' in o||'custom' in o||'indices' in o||'fx_per_usd' in o)) throw new Error('This does not look like a Ballast feed file.');
   o.imported_at=new Date().toISOString(); state.feed=o;
   const per=o.fx_per_usd;
-  if(per&&per[state.base]>0){ for(const c in per){ if(c!==state.base&&per[c]>0){ state.fx[c]=+(per[state.base]/per[c]).toPrecision(6); delete state.fxImplied[c]; } } }
+  if(per&&per[state.base]>0){ for(const c in per){ if(c!==state.base&&per[c]>0) setRate(c,per[state.base]/per[c],'market'); } }
   dirty();
 }
 function newsKey(t){ return String(t||'').toLowerCase().replace(/\W+/g,' ').trim().slice(0,90); }
@@ -440,7 +469,7 @@ const VIEWS=[['overview','Overview'],['holdings','Holdings'],['performance','Per
 function warnings(m){
   const w=[];
   if(state.demo) w.push('<div class="banner info">You are looking at sample data. <button class="link" data-a="clear-demo">Clear it</button> before importing your own statement.</div>');
-  if(m.missing.length) w.push('<div class="banner">No exchange rate for '+esc(m.missing.join(', '))+'. Those holdings are counted at 1:1 with '+esc(state.base)+' until you set a rate. <button class="link" data-a="go" data-v="data">Set rates</button></div>');
+  if(m.missing.length) w.push('<div class="banner"><b>Totals are wrong until exchange rates are set.</b> There is no rate for '+esc(m.missing.join(', '))+', so those holdings are being counted as if 1 unit equalled 1 '+esc(state.base)+'. '+(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken()?'<button class="link" data-a="fx-fetch">Fetch current rates</button> or ':'')+'<button class="link" data-a="go" data-v="data">enter them yourself</button>.</div>');
   const anyLive=m.rows.some(r=>r.live);
   if(fin(state.stmtNav)&&!anyLive&&!state.demo&&m.nav){ const d=Math.abs(m.nav-state.stmtNav)/Math.abs(state.stmtNav); if(d>0.015) w.push('<div class="banner">Holdings plus cash add up to '+money(m.nav)+' but the statement reports '+money(state.stmtNav)+' ('+pct(d*100)+' apart). Usual causes are exchange rates, cash held in a currency the report omits, or accrued interest.</div>'); }
   const g=state.positions.filter(p=>p.auto&&p.cls==='Equity').length;
@@ -696,8 +725,8 @@ function vData(){
     '<label>Daily move alert (%)<input class="in" type="number" min="1" max="50" value="'+st.move+'" data-c="set" data-k="move"></label>'+
     '<label>Rebalance tolerance (points)<input class="in" type="number" min="1" max="30" value="'+st.tol+'" data-c="set" data-k="tol"></label>'+
     '<label>Theme<select class="in" data-c="theme"><option value="auto"'+(st.theme==='auto'?' selected':'')+'>Match device</option><option value="light"'+(st.theme==='light'?' selected':'')+'>Light</option><option value="dark"'+(st.theme==='dark'?' selected':'')+'>Dark</option></select></label></div>'+
-    '<h3 style="font-size:14.5px;margin:20px 0 4px">Exchange rates</h3><p class="sub" style="margin-bottom:10px">Value of one unit of each currency in '+esc(state.base)+'. Ballast fills these in from your statement or your feed when it can.</p>'+
-    (cur.size?'<div class="form">'+Array.from(cur).map(c=>'<label>1 '+esc(c)+' in '+esc(state.base)+(state.fxImplied[c]?' (implied from statement)':'')+'<input class="in" inputmode="decimal" value="'+(state.fx[c]||'')+'" placeholder="required" data-c="fx" data-k="'+esc(c)+'"></label>').join('')+'</div>':'<p class="sub">All your holdings are in '+esc(state.base)+'.</p>')+'</section>'+
+    '<h3 style="font-size:14.5px;margin:20px 0 4px">Exchange rates</h3><p class="sub" style="margin-bottom:10px">Value of one unit of each currency in '+esc(state.base)+'. Ballast uses, in this order: a rate you type, the rate in your statement, then market rates. '+(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken()?'<button class="link" data-a="fx-fetch">Fetch current market rates</button>':'')+'</p>'+
+    (cur.size?'<div class="form">'+Array.from(cur).map(c=>'<label>1 '+esc(c)+' in '+esc(state.base)+rateNote(c)+'<input class="in" inputmode="decimal" value="'+(state.fx[c]||'')+'" placeholder="required" data-c="fx" data-k="'+esc(c)+'"></label>').join('')+'</div>':'<p class="sub">All your holdings are in '+esc(state.base)+'.</p>')+'</section>'+
   backupSection()+storageSection();
 }
 
@@ -854,13 +883,14 @@ async function restorePrev(){
 }
 const EXTRA_ACTIONS={
   tk:el=>{ ui.tk=el.dataset.v; render(); },
+  'fx-fetch':async()=>{ try{ const n=await fetchRates(true); toast(n?'Exchange rates updated':'No rates were returned'); }catch(e){ toast(e.message); } render(true); },
   'gate-signin':async()=>{ try{ showGate('busy','Waiting for Google…'); await BL.cloud.signIn(); await afterSignIn(); }catch(e){ showGate('signin',e.message); } },
   'gate-local':()=>{ persist.mode='local'; persist.blocked=false; state=load(); ledgerMemo=perfMemo=memo=null; hideGate(); applyTheme(); render(); setBadge(); },
   'gate-unlock':()=>unlock(),
   'gate-retry':()=>afterSignIn(),
   'drive-connect':async()=>{ try{ await BL.cloud.signIn(); await afterSignIn(); }catch(e){ toast(e.message); hideGate(); } },
   'sign-out':()=>{ BL.cloud.signOut(); persist.mode='local'; persist.pass=null; persist.blocked=true; state=blank(); ledgerMemo=perfMemo=memo=null; ui.view='overview'; render(); showGate('signin'); },
-  'id-signin':async()=>{ try{ await BL.cloud.signInId(); toast('Market data allowed'); }catch(e){ toast(e.message); } render(true); },
+  'id-signin':async()=>{ try{ await BL.cloud.signInId(); toast('Market data allowed'); autoRates(); }catch(e){ toast(e.message); } render(true); },
   'enc-setup':()=>passDialog(persist.pass?'Change passphrase':'Encrypt your Drive data','Your data file in Drive will be encrypted with this passphrase. It is never stored or sent anywhere. If you lose it, the data cannot be recovered, so keep a plain or encrypted backup too.','enc-go','Encrypt'),
   'enc-go':async()=>{ const p=readNewPass(); if(!p) return; persist.pass=p; closeDlg(); await persistNow(); render(true); toast('Encryption is on'); },
   'enc-remove':()=>openDlg('Turn encryption off?','<p>The file in Drive will be saved as readable text. Anyone who can open your Drive could read it.</p><div class="row" style="margin-top:14px"><button class="btn danger" data-a="enc-remove-go">Turn it off</button><button class="btn ghost" data-a="close">Cancel</button></div>'),
@@ -956,14 +986,14 @@ async function handleFiles(files){
     let text=''; try{ text=await f.text(); }catch(e){ ui.log.push({ok:false,msg:'Could not read '+f.name}); continue; }
     const r=routeText(f.name,text,ibkr); ui.log.push(r); if(r.ok&&r.view) view=r.view;
   }
-  if(ibkr.length){ ingest(ibkr); ui.view=ibkr.length>1?'performance':'overview'; toast('Imported '+ibkr.length+' statement'+(ibkr.length>1?'s':'')); }
+  if(ibkr.length){ ingest(ibkr); autoRates(); ui.view=ibkr.length>1?'performance':'overview'; toast('Imported '+ibkr.length+' statement'+(ibkr.length>1?'s':'')); }
   else if(view){ ui.view=view; if(view==='markets') ui.mk='prices'; const ok=ui.log.find(l=>l.ok&&l.view===view); toast(ok?ok.msg:'Imported'); }
   render(); window.scrollTo(0,0);
   if(ui.pendingEnc) askRestorePass();
 }
 function handlePaste(text){
   const ibkr=[]; ui.log=[]; const r=routeText('pasted text',text,ibkr); ui.log.push(r);
-  if(ibkr.length){ ingest(ibkr); ui.view='overview'; toast('Statement imported'); } else if(r.ok&&r.view) ui.view=r.view;
+  if(ibkr.length){ ingest(ibkr); autoRates(); ui.view='overview'; toast('Statement imported'); } else if(r.ok&&r.view) ui.view=r.view;
   render();
 }
 
@@ -1145,8 +1175,8 @@ document.addEventListener('change',e=>{
   else if(c==='tg'){ const kind=el.dataset.k; const t=state.tg[kind==='class'?'cls':'region']; t[el.dataset.key]=Math.max(0,num(el.value)||0); if(kind==='class') state.tg.clsProfile='Custom'; else state.tg.regionProfile='Custom'; dirty(); render(true); }
   else if(c==='set'){ const v=num(el.value); if(fin(v)&&v>0){ state.set[el.dataset.k]=v; dirty(); render(true); } }
   else if(c==='theme'){ state.set.theme=el.value; applyTheme(); dirty(); }
-  else if(c==='fx'){ const v=num(el.value); if(v>0){ state.fx[el.dataset.k]=v; delete state.fxImplied[el.dataset.k]; } else delete state.fx[el.dataset.k]; dirty(); render(true); }
-  else if(c==='base'){ const b=el.value.trim().toUpperCase(); if(/^[A-Z]{3}$/.test(b)&&b!==state.base){ state.base=b; state.fx={}; state.fxImplied={}; state.stmtNav=null; dirty(); render(true); toast('Base currency changed. Set your exchange rates below.'); } }
+  else if(c==='fx'){ const v=num(el.value); const k=el.dataset.k; if(v>0){ state.fx[k]=v; delete state.fxImplied[k]; delete state.fxSrc[k]; } else { delete state.fx[k]; delete state.fxImplied[k]; delete state.fxSrc[k]; } dirty(); render(true); }
+  else if(c==='base'){ const b=el.value.trim().toUpperCase(); if(/^[A-Z]{3}$/.test(b)&&b!==state.base){ state.base=b; state.fx={}; state.fxImplied={}; state.fxSrc={}; state.stmtNav=null; dirty(); render(true); toast('Base currency changed. Set your exchange rates below.'); } }
 });
 document.addEventListener('input',e=>{
   const el=e.target; if(!el.dataset.i) return;
