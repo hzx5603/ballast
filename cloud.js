@@ -33,7 +33,9 @@
   }
   async function ensureClient(kind) {
     if (clients[kind]) return clients[kind]; await waitForGis();
-    clients[kind] = gis().initTokenClient({ client_id: idOf(), scope: SCOPES[kind], hint: cfg().GOOGLE_ACCOUNT_HINT || undefined, callback: () => { }, error_callback: () => { } });
+    clients[kind] = gis().initTokenClient({ client_id: idOf(), scope: SCOPES[kind], include_granted_scopes: false, hint: cfg().GOOGLE_ACCOUNT_HINT || undefined, callback: () => { }, error_callback: () => { } });
+    // include_granted_scopes:false matters. Google's default returns a token carrying every permission ever granted to this app, so the
+    // identity token would also carry Drive access, and the Worker (rightly) refuses it.
     return clients[kind];
   }
   /** kind: 'drive' (default) or 'id'. opts.silent: try without showing a prompt (works after the user has approved once). */
