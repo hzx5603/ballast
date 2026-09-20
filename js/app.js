@@ -1,9 +1,9 @@
 (function(){
 'use strict';
 const BL=window.BL; const CFG=window.BALLAST_CONFIG||{};
-BL.ver=BL.ver||{}; BL.ver.app=9;
+BL.ver=BL.ver||{}; BL.ver.app=10;
 /* Version tracking. Each file records the release it last changed in. If one of them on your site is older than this file expects, Ballast says which. */
-const RELEASE={n:9,date:'2026-09-20'};
+const RELEASE={n:10,date:'2026-09-20'};
 const REQUIRES={'lib-core':9,'cloud':6,'views-history':8,'boot':6};
 function versionRows(){ const v=BL.ver||{}; const rows=[{file:'app.js',have:RELEASE.n,need:RELEASE.n}]; Object.keys(REQUIRES).forEach(k=>rows.push({file:k+'.js',have:v[k]==null?null:v[k],need:REQUIRES[k]})); rows.forEach(r=>{ r.ok=r.have!=null&&r.have>=r.need; }); return rows; }
 function versionProblems(){ return versionRows().filter(r=>!r.ok); }
@@ -882,10 +882,11 @@ async function refreshFeed(){
 function overviewLine(){
   const p=getPerf(); if(p.series.length<2) return ''; const parts=[];
   if(fin(p.gain)&&fin(p.contributions)&&p.contributions>0){
-    const m=M(); const diff=fin(p.nav)&&m.total?Math.abs(p.nav-m.total):0;
-    parts.push('<span class="'+cls(p.gain)+'">'+smoney(p.gain)+' gain on '+money(p.contributions)+' put in</span>'+(diff>=1?'<span class="muted"> (worked out from the statement value of '+money(p.nav)+', which includes accrued dividends and interest that are not in the holdings and cash above)</span>':''));
+    // With live prices the headline is today's value, so the gain uses it too. Otherwise the gain uses the statement's own value.
+    const m=M(); const live=m.rows.some(r=>r.live); const gain=live?m.total-p.contributions:p.gain; const diff=fin(p.nav)&&m.total?Math.abs(p.nav-m.total):0;
+    parts.push('<span class="'+cls(gain)+'">'+smoney(gain)+' gain on '+money(p.contributions)+' put in</span>'+(live?'<span class="muted"> (using live prices)</span>':diff>=1?'<span class="muted"> (worked out from the statement value of '+money(p.nav)+')</span>':''));
   }
-  if(fin(p.totalTwr)&&p.verifiedDays>0) parts.push('<span class="muted">'+(p.coarse?'approximate return ':'time-weighted return ')+spct(p.totalTwr*100)+(fin(p.annualised)?', about '+spct(p.annualised*100)+' a year':'')+'</span>');
+  if(fin(p.totalTwr)&&p.verifiedDays>0) parts.push('<span class="muted">'+(p.coarse?'approximate return ':'time-weighted return ')+spct(p.totalTwr*100)+(fin(p.annualised)?', about '+spct(p.annualised*100)+' a year':'')+(M().rows.some(r=>r.live)?', to your last statement':'')+'</span>');
   return parts.join(' · ');
 }
 const todayIso=()=>new Date().toISOString().slice(0,10);
