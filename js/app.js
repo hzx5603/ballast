@@ -1,9 +1,9 @@
 (function(){
 'use strict';
 const BL=window.BL; const CFG=window.BALLAST_CONFIG||{};
-BL.ver=BL.ver||{}; BL.ver.app=10;
+BL.ver=BL.ver||{}; BL.ver.app=11;
 /* Version tracking. Each file records the release it last changed in. If one of them on your site is older than this file expects, Ballast says which. */
-const RELEASE={n:10,date:'2026-09-20'};
+const RELEASE={n:11,date:'2026-09-20'};
 const REQUIRES={'lib-core':9,'cloud':6,'views-history':8,'boot':6};
 function versionRows(){ const v=BL.ver||{}; const rows=[{file:'app.js',have:RELEASE.n,need:RELEASE.n}]; Object.keys(REQUIRES).forEach(k=>rows.push({file:k+'.js',have:v[k]==null?null:v[k],need:REQUIRES[k]})); rows.forEach(r=>{ r.ok=r.have!=null&&r.have>=r.need; }); return rows; }
 function versionProblems(){ return versionRows().filter(r=>!r.ok); }
@@ -309,6 +309,29 @@ function recalcNote(){
   if(c.staleNoCopy) parts.push(c.staleNoCopy+' statement'+(c.staleNoCopy>1?'s were':' was')+' imported before Ballast kept cleaned copies, so '+(c.staleNoCopy>1?'they are':'it is')+' missing those details. <button class="link" data-a="go" data-v="data">Import '+(c.staleNoCopy>1?'them':'it')+' once more</button>. After that the Recalculate button works without the files.');
   return '<div class="banner info">'+parts.join(' ')+'</div>';
 }
+/* ---- quick actions on the Overview ---- */
+/** Statement values: the statement's own prices and exchange rates. Live prices: prices from the feed with market rates, so both come from the same place. */
+async function setValueMode(live){
+  state.set.live=!!live; dirty();
+  try{
+    if(!live){ if(copyStats().withCopy){ recalcFromSaved(); toast('Showing statement values'); } else toast('Showing statement values. Import your statements once more to restore the statement\'s exchange rates.'); }
+    else if(liveInUse()){ if(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken()) await fetchRates(true); toast('Showing live prices'); }
+    else toast('Live prices are on. Press Refresh market data to load them.');
+  }catch(e){ toast(e.message); }
+  render(true);
+}
+function quickBar(){
+  if(state.demo||!state.positions.length) return '';
+  const api=BL.cloud.apiConfigured(), id=BL.cloud.hasIdToken(), cs=copyStats(), live=!!state.set.live, lu=liveInUse(), t=tracked(); const b=[];
+  b.push('<div class="chips" role="group" aria-label="Values shown"><button class="chip" aria-pressed="'+(!live)+'" data-a="values" data-v="statement">Statement values</button><button class="chip" aria-pressed="'+live+'" data-a="values" data-v="live">Live prices</button></div>');
+  if(api) b.push(id?'<button class="btn sm" data-a="refresh-feed"'+(ui.refreshing?' disabled':'')+'>'+(ui.refreshing?'Refreshing…':'Refresh market data')+'</button>':'<button class="btn sm" data-a="id-signin">Allow market data</button>');
+  if(state.snaps.length) b.push('<button class="btn ghost sm" data-a="recalc"'+(cs.withCopy?'':' disabled title="Import your statements once more so Ballast can keep a cleaned copy"')+'>Recalculate</button>');
+  if(persist.mode==='drive') b.push('<button class="btn ghost sm" data-a="sign-out" title="Sign out and clear your data from this page">Lock</button>');
+  const st=[live?(lu?'Live prices with market exchange rates':'Live prices are on but not loaded yet'):'Values as at '+(t?esc(BL.core.fmtDay(t.through)):'your last statement')+', with your statement\'s exchange rates'];
+  if(state.feed&&(state.feed.generated_at||state.feed.imported_at)) st.push('market data '+esc(ago(state.feed.generated_at||state.feed.imported_at)));
+  if(ui.refreshMsg) st.push(esc(ui.refreshMsg));
+  return '<div class="row" style="margin:6px 0 4px;gap:10px;flex-wrap:wrap">'+b.join('')+'</div><div class="sub" style="margin-bottom:10px">'+st.join(' · ')+'</div>';
+}
 function rateSrc(c){ if(!(state.fx[c]>0)) return ''; return (state.fxSrc&&state.fxSrc[c])||(state.fxImplied[c]?'implied':'manual'); }
 function setRate(c,v,src,force){
   if(!(v>0)||!fin(v)||c===state.base) return false; const cur=rateSrc(c);
@@ -525,7 +548,7 @@ function vOverview(){
   const alerts=getAlerts().slice(0,7);
   const top=m.rows.slice().sort((a,b)=>b.val-a.val).slice(0,8).map(r=>({label:r.symbol,v:r.w,color:r.flag?'var(--flag)':null}));
   const scaleNote=ui.dim==='region'?'Equities only, with global and broad emerging funds split by their approximate look-through weights.':ui.dim==='sector'?'Equities only.':'';
-  return warnings(m)+
+  return warnings(m)+quickBar()+
   '<section class="sec"><div class="nav-val">'+money(m.total)+'</div><div class="sub" style="margin-top:4px">'+trackedSub()+(m.rows.some(r=>r.live)?', prices updated from your feed':'')+(m.accr>=1?'. Includes '+money(m.accr)+' of accrued dividends and interest, as your statement does':'')+'</div>'+
     (monthLine?'<div style="margin-top:4px">'+monthLine+'</div>':'')+
     '<div class="stats"><div><span class="lab">Invested</span><b>'+money(m.inv)+'</b></div><div><span class="lab">Cash</span><b>'+money(m.cashV)+'</b></div>'+
@@ -918,6 +941,7 @@ async function restorePrev(){
 }
 const EXTRA_ACTIONS={
   tk:el=>{ ui.tk=el.dataset.v; render(); },
+  'values':el=>setValueMode(el.dataset.v==='live'),
   'recalc':()=>{ const r=recalcFromSaved(); toast(r.done?'Recalculated '+r.done+' statement'+(r.done>1?'s':'')+(r.skipped?'. '+r.skipped+' had no saved copy':''):'There are no saved copies to recalculate from. Import the statements once more.'); autoRates(); render(true); },
   'copies-toggle':()=>{ state.set.keepCopies=state.set.keepCopies===false; dirty(); render(true); },
   'copies-delete':()=>openDlg('Delete saved statement copies?','<p>Ballast will keep the numbers it already extracted, but it will no longer be able to recalculate from the statements. You would need to import them again to get that back.</p><div class="row" style="margin-top:14px"><button class="btn danger" data-a="copies-delete-go">Delete the copies</button><button class="btn ghost" data-a="close">Cancel</button></div>'),
@@ -1209,7 +1233,7 @@ document.addEventListener('change',e=>{
   if(el.dataset.g!==undefined){ ui.gen.map[el.dataset.g]=+el.value; return; }
   const c=el.dataset.c; if(!c) return;
   if(c==='filt'){ ui.filt=el.value; $('#htable').innerHTML=holdingsTable(); }
-  else if(c==='live'){ state.set.live=el.checked; dirty(); render(true); }
+  else if(c==='live'){ setValueMode(el.checked); }
   else if(c==='contrib'){ ui.contrib=Math.max(0,num(el.value)||0); render(true); }
   else if(c==='profile'){ const k=el.dataset.k; if(k==='cls'){ state.tg.clsProfile=el.value; state.tg.cls=Object.assign({},CLASS_PROFILES[el.value]); } else { state.tg.regionProfile=el.value; state.tg.region=Object.assign({},REGION_PROFILES[el.value]); } dirty(); render(true); }
   else if(c==='tg'){ const kind=el.dataset.k; const t=state.tg[kind==='class'?'cls':'region']; t[el.dataset.key]=Math.max(0,num(el.value)||0); if(kind==='class') state.tg.clsProfile='Custom'; else state.tg.regionProfile='Custom'; dirty(); render(true); }
