@@ -1,6 +1,7 @@
 /* Performance and Activity views. Loaded after app.js. */
 (function () {
   'use strict';
+  BL.ver = BL.ver || {}; BL.ver['views-history'] = 6;
   const A = BL.app, C = BL.core, ui = A.ui, esc = A.esc, money = A.money, smoney = A.smoney, spct = A.spct, pct = A.pct, cls = A.cls, fin = Number.isFinite;
   const S = () => A.S(); const lineChart = A.lineChart;
   const today = () => new Date().toISOString().slice(0, 10);
@@ -33,11 +34,11 @@
   function crossCheck(p) {
     const rows = [];
     S().snaps.filter(s => fin(s.twrStmt) && s.from && s.to).forEach(s => {
-      const iv = p.intervals.find(i => i.to === s.to && i.from === C.addDays(s.from, -1) && fin(i.r)); if (!iv) return;
-      rows.push({ label: s.label, ibkr: s.twrStmt / 100, mine: iv.r });
+      const iv = p.intervals.find(i => i.to === s.to && i.from === C.addDays(s.from, -1) && fin(i.rDietz)); if (!iv) return;
+      rows.push({ label: s.label, ibkr: s.twrStmt / 100, mine: iv.rDietz });
     });
     if (!rows.length) return '';
-    return '<section class="sec"><div class="sec-head"><h2>Cross-check against your statements</h2><span class="sub">IBKR values every day, Ballast only has period ends, so small differences are normal</span></div><div class="scroll"><table class="t"><thead><tr><th>Period</th><th class="num">Statement says</th><th class="num">Ballast calculates</th><th class="num">Difference</th></tr></thead><tbody>' +
+    return '<section class="sec"><div class="sec-head"><h2>Cross-check against your statements</h2><span class="sub">Ballast uses the figure in your statement. This shows how far its own estimate from period-end values would be. Long periods with large deposits can be far off.</span></div><div class="scroll"><table class="t"><thead><tr><th>Period</th><th class="num">Statement says (used)</th><th class="num">Ballast estimate</th><th class="num">Difference</th></tr></thead><tbody>' +
       rows.slice(-12).reverse().map(r => '<tr><td>' + esc(r.label) + '</td><td class="num">' + pc1(r.ibkr) + '</td><td class="num">' + pc1(r.mine) + '</td><td class="num ' + (Math.abs(r.mine - r.ibkr) > 0.01 ? 'loss' : 'muted') + '">' + ((r.mine - r.ibkr) * 100).toFixed(2) + ' pts</td></tr>').join('') + '</tbody></table></div></section>';
   }
   function coverageSection() {
@@ -58,7 +59,7 @@
     if (p.series.length < 2) return '<div class="banner info">Only one point so far. Import more statements to see a history.</div>' + importHelp();
     const cut = rangeCut(ui.pf.range); const ser = cut ? p.series.filter(s => s.date >= cut) : p.series; const view = ser.length >= 2 ? ser : p.series;
     const base0 = view[0].idx; const rangeTwr = view[view.length - 1].idx / base0 - 1;
-    const worst = p.maxDrawdown;
+    const worst = p.maxDrawdown; const tk = C.trackedThrough(st.snaps, today());
     const R = [['all', 'Since the start'], ['3y', '3 years'], ['1y', '1 year'], ['ytd', 'This year']];
     let bench = '';
     const b = ui.pf;
@@ -72,13 +73,16 @@
       }
     }
     const dd = lineChart({ h: 150, label: 'Fall from the previous high', fmt: v => (v * 100).toFixed(0) + '%', zero: true, max: 0, series: [{ name: 'Fall from previous high', color: 'var(--loss)', nodots: true, pts: p.drawdown.filter(x => !cut || x.date >= cut).map(x => ({ d: x.date, v: x.dd })) }] });
-    return (p.unverified ? '<div class="banner">' + p.unverified + ' period' + (p.unverified > 1 ? 's' : '') + ' between statements could not be verified, so they are left out of the return figures.</div>' : '') +
+    return (p.coarse ? '<div class="banner">Some of your statements cover long periods and do not report their own return, so the return figures below are approximate. They behave more like a money-weighted return when you add money gradually. Import monthly statements for accurate time-weighted returns.</div>' : '') +
+      (p.avgIntervalDays > 60 ? '<div class="banner info">Falls from the previous high are measured only at statement dates. Real falls between them may be larger.</div>' : '') +
+      (p.unverified ? '<div class="banner">' + p.unverified + ' period' + (p.unverified > 1 ? 's' : '') + ' between statements could not be verified, so they are left out of the return figures.</div>' : '') +
       '<div class="tiles">' +
       tile('Net asset value', money(p.nav), 'at ' + esc(C.fmtDay(p.series[p.series.length - 1].date))) +
+      (tk && !st.demo ? tile('Statements tracked to', esc(C.fmtDay(tk.through)), esc(C.agoText(tk.days)) + (tk.status === 'current' ? '' : '. Next: ' + esc(tk.next.label)), tk.status === 'current' ? 'gain' : tk.status === 'overdue' ? 'loss' : '') : '') +
       tile('Money you put in', money(p.contributions), 'deposits less withdrawals') +
       tile('Gain', smoney(p.gain), p.contributions > 0 ? spct(p.gain / p.contributions * 100) + ' on what you put in' : '', cls(p.gain)) +
-      tile('Return, deposits removed', pc1(p.totalTwr), fin(p.annualised) ? 'about ' + spct(p.annualised * 100) + ' a year' : 'time-weighted', cls(p.totalTwr)) +
-      tile('Return, your timing', pc1(p.xirr), 'money-weighted, per year', cls(p.xirr)) +
+      tile('Return, deposits removed', pc1(p.totalTwr), (p.coarse ? 'approximate' : p.reportedCount ? 'as reported by your statements' : 'time-weighted') + (fin(p.annualised) ? ', about ' + spct(p.annualised * 100) + ' a year' : ''), cls(p.totalTwr)) +
+      tile('Return, your timing', pc1(p.xirr), p.spanDays < 365 ? 'money-weighted, scaled to a year, so treat with caution on a short history' : 'money-weighted, per year', cls(p.xirr)) +
       tile('Worst fall', pc1(worst.dd), worst.from ? esc(C.fmtDay(worst.from)) + ' to ' + esc(C.fmtDay(worst.to)) : '', 'loss') +
       (fin(p.vol) ? tile('Volatility', pct(p.vol * 100, 1), 'yearly, from ' + p.volBasis + ' returns') : '') + '</div>' +
       '<div class="row" style="justify-content:space-between;margin:18px 0 8px"><div class="chips" role="group" aria-label="Period">' + R.map(r => '<button class="chip" aria-pressed="' + (ui.pf.range === r[0]) + '" data-a="pf-range" data-v="' + r[0] + '">' + r[1] + '</button>').join('') + '</div><span class="sub">Return in this period: <b class="' + cls(rangeTwr) + '">' + pc1(rangeTwr) + '</b></span></div>' +
@@ -136,13 +140,14 @@
     const shown = rows.slice(0, f.n);
     const line = e => { const isTrade = e.type === 'buy' || e.type === 'sell' || e.type === 'fx';
       return '<tr><td class="nowrap">' + esc(e.date) + '</td><td>' + esc(C.describeEntry(e)) + (e.desc && (e.type === 'div' || e.type === 'tax') ? '<span class="desc">' + esc(e.desc) + '</span>' : '') + '</td><td class="sym">' + esc(e.sym || '') + '</td><td class="num ' + (e.qty < 0 ? 'loss' : '') + '">' + (isTrade && fin(e.qty) ? A.qtyFmt(e.qty) : '') + '</td><td class="num">' + (fin(e.price) ? A.px(e.price) : '') + '</td><td class="num ' + cls(e.amt) + '">' + (fin(e.amt) ? esc(e.ccy) + ' ' + A.px(e.amt) : '') + '</td><td class="num">' + (fin(e.fee) && e.fee ? esc(e.feeCcy || e.ccy) + ' ' + A.px(Math.abs(e.fee)) : '') + '</td><td class="num ' + cls(e.pnl) + '">' + (fin(e.pnl) && e.pnl ? A.px(e.pnl) : '') + '</td></tr>'; };
-    const fx = led.filter(e => e.type === 'fx');
-    return '<div class="tiles">' + tile('Transactions', String(rows.length), 'in this view') + tile('Bought', money(t.buys), t.trades + ' trades, sold ' + money(t.sells)) + tile('Commissions paid', money(-t.comm), 'on trades and conversions') + tile('Other fees', money(-t.fees)) + tile('Dividends', money(t.div), 'tax withheld ' + money(-t.tax)) + tile('Interest', money(t.int)) + tile('Net deposits', money(t.dep + t.wd)) + tile('Realized gain', smoney(t.pnl), 'as reported by IBKR', cls(t.pnl)) + '</div>' +
+    const fx = led.filter(e => e.type === 'fx'); const tk = C.trackedThrough(st.snaps, today());
+    const segs = C.chooseSegments(st.snaps); const notItemised = segs.reduce((a, sg) => a + (fin((sg.s.change || {})['Sales Tax']) ? sg.s.change['Sales Tax'] : 0), 0);
+    return (tk && !st.demo ? '<p class="sub" style="margin-bottom:10px">Statements tracked to <b>' + esc(C.fmtDay(tk.through)) + '</b> (' + esc(C.agoText(tk.days)) + ')' + (tk.latestTx ? '. Latest transaction: ' + esc(C.fmtDay(tk.latestTx)) : '') + (tk.status === 'current' ? '' : '. Anything after that date is not shown until you import the statement starting ' + esc(C.fmtDay(tk.next.from))) + '.</p>' : '') + '<div class="tiles">' + tile('Transactions', String(rows.length), 'in this view') + tile('Bought', money(t.buys), t.trades + ' trades, sold ' + money(t.sells)) + tile('Commissions paid', money(-t.comm), 'on trades and conversions') + tile('Other fees', money(-t.fees)) + tile('Dividends', money(t.div), 'tax withheld ' + money(-t.tax)) + tile('Interest', money(t.int)) + tile('Net deposits', money(t.dep + t.wd)) + tile('Realized gain', smoney(t.pnl), 'as reported by IBKR', cls(t.pnl)) + '</div>' +
       (sm.missing.length ? '<div class="banner" style="margin-top:12px">No exchange rate set for ' + esc(sm.missing.join(', ')) + ', so those amounts are left out of the totals above. <button class="link" data-a="go" data-v="data">Set rates</button></div>' : '') +
       '<div class="row" style="margin:18px 0 10px;justify-content:space-between"><div class="chips" role="group" aria-label="Type">' + Object.keys(TYPES).map(k => '<button class="chip" aria-pressed="' + (f.type === k) + '" data-a="lg-type" data-v="' + k + '">' + TYPES[k][0] + '</button>').join('') + '</div>' +
       '<div class="row"><select class="in" data-vc="lg-year" aria-label="Year"><option value="all">All years</option>' + years.map(y => '<option' + (f.year === y ? ' selected' : '') + '>' + y + '</option>').join('') + '</select><input class="in" data-vc="lg-q" placeholder="Search symbol or text" value="' + esc(f.q) + '" style="width:190px"><button class="btn ghost sm" data-a="export-ledger">Export CSV</button></div></div>' +
       (rows.length ? '<div class="scroll"><table class="t"><thead><tr><th>Date</th><th>What happened</th><th>Symbol</th><th class="num">Quantity</th><th class="num">Price</th><th class="num">Amount</th><th class="num">Fee</th><th class="num">Realized</th></tr></thead><tbody>' + shown.map(line).join('') + '</tbody></table></div>' + (rows.length > shown.length ? '<div style="margin-top:10px"><button class="btn ghost" data-a="lg-more">Show more (' + (rows.length - shown.length) + ' left)</button></div>' : '') : A.empty('Nothing matches these filters.')) +
-      '<section class="sec"><div class="sec-head"><h2>Year by year</h2><span class="sub">In ' + esc(st.base) + ', using your exchange rates. Cost is commissions, fees and tax withheld as a share of your average net asset value</span></div><div class="scroll"><table class="t"><thead><tr><th>Year</th><th class="num">Trades</th><th class="num">Bought</th><th class="num">Sold</th><th class="num">Commissions</th><th class="num">Fees</th><th class="num">Dividends</th><th class="num">Tax withheld</th><th class="num">Interest</th><th class="num">Net deposits</th><th class="num">Realized</th><th class="num">Cost</th></tr></thead><tbody>' + yrow + '</tbody></table></div></section>' +
+      '<section class="sec"><div class="sec-head"><h2>Year by year</h2><span class="sub">In ' + esc(st.base) + ', using your exchange rates. Cost is commissions, fees and tax withheld as a share of your average net asset value</span></div><div class="scroll"><table class="t"><thead><tr><th>Year</th><th class="num">Trades</th><th class="num">Bought</th><th class="num">Sold</th><th class="num">Commissions</th><th class="num">Fees</th><th class="num">Dividends</th><th class="num">Tax withheld</th><th class="num">Interest</th><th class="num">Net deposits</th><th class="num">Realized</th><th class="num">Cost</th></tr></thead><tbody>' + yrow + '</tbody></table></div>' + (Math.abs(notItemised) > 0.005 ? '<p class="sub" style="margin-top:8px;max-width:80ch">Your statements also report sales tax of ' + money(notItemised) + ' in total (in ' + esc(st.base) + '), for example on commissions. It is not itemised per transaction, so it is not in the cost figures above.</p>' : '') + '</section>' +
       '<section class="sec"><div class="sec-head"><h2>By holding</h2></div><div class="scroll"><table class="t"><thead><tr><th>Symbol</th><th class="num">Trades</th><th class="num">Bought</th><th class="num">Sold</th><th class="num">Commissions</th><th class="num">Dividends</th><th class="num">Tax withheld</th><th class="num">Realized</th></tr></thead><tbody>' + sy + '</tbody></table></div></section>' +
       dividends() +
       (fx.length ? '<section class="sec"><div class="sec-head"><h2>Currency conversions</h2></div><p>' + fx.length + ' conversion' + (fx.length > 1 ? 's' : '') + ', with commissions of ' + money(-fx.reduce((s, e) => s + (rate(e.feeCcy) == null ? 0 : e.fee * rate(e.feeCcy)), 0)) + '.</p><p class="sub" style="max-width:74ch;margin-top:4px">This counts the commission only. The exchange rate itself also carries a spread that statements do not show separately.</p></section>' : '');

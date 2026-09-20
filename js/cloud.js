@@ -8,6 +8,7 @@
 (function (root) {
   'use strict';
   const BL = root.BL = root.BL || {};
+  BL.ver = BL.ver || {}; BL.ver.cloud = 6;
   // Two separate tokens on purpose. The Drive token only ever goes to Google. The identity token has no access to
   // any Google data and is the only thing the Worker ever sees.
   const SCOPES = { drive: 'https://www.googleapis.com/auth/drive.file', id: 'https://www.googleapis.com/auth/userinfo.email' };
@@ -16,7 +17,15 @@
   const clients = { drive: null, id: null }, tokens = { drive: null, id: null }, expiry = { drive: 0, id: 0 };
   let folderId = null, fileId = null, prevId = null, rawAtLoad = null, backedUp = false, email = '';
 
-  const configured = () => /^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$/i.test(cfg().GOOGLE_CLIENT_ID || '');
+  const idOf = () => String(cfg().GOOGLE_CLIENT_ID || '').trim();
+  const configured = () => /^\d{6,}-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(idOf());
+  /** Says what is wrong with js/config.js, or '' if the client ID looks right. */
+  function configProblem() {
+    const id = idOf();
+    if (!id) return 'GOOGLE_CLIENT_ID is empty in js/config.js. Paste your client ID between the quotes, save, and reload (a hard refresh may be needed).';
+    if (!configured()) return 'GOOGLE_CLIENT_ID in js/config.js does not look like a client ID. It should be numbers, a dash, letters and numbers, then .apps.googleusercontent.com, with no spaces or "..." in it.';
+    return '';
+  }
   const apiConfigured = () => /^https:\/\/[^\s/]+$/.test(cfg().API_BASE || '') && !/YOUR-SUBDOMAIN/i.test(cfg().API_BASE || '');
   const gis = () => root.google && root.google.accounts && root.google.accounts.oauth2;
 
@@ -25,13 +34,15 @@
   }
   async function ensureClient(kind) {
     if (clients[kind]) return clients[kind]; await waitForGis();
-    clients[kind] = gis().initTokenClient({ client_id: cfg().GOOGLE_CLIENT_ID, scope: SCOPES[kind], hint: cfg().GOOGLE_ACCOUNT_HINT || undefined, callback: () => { }, error_callback: () => { } });
+    clients[kind] = gis().initTokenClient({ client_id: idOf(), scope: SCOPES[kind], include_granted_scopes: false, hint: cfg().GOOGLE_ACCOUNT_HINT || undefined, callback: () => { }, error_callback: () => { } });
+    // include_granted_scopes:false matters. Google's default returns a token carrying every permission ever granted to this app, so the
+    // identity token would also carry Drive access, and the Worker (rightly) refuses it.
     return clients[kind];
   }
   /** kind: 'drive' (default) or 'id'. opts.silent: try without showing a prompt (works after the user has approved once). */
   async function signIn(opts, kind) {
     kind = kind || 'drive';
-    if (!configured()) throw new Error('Google sign-in is not set up. Add your client ID to js/config.js.');
+    if (!configured()) throw new Error(configProblem());
     const c = await ensureClient(kind);
     return new Promise((resolve, reject) => {
       c.callback = r => { if (r && r.access_token) { tokens[kind] = r.access_token; expiry[kind] = Date.now() + (Number(r.expires_in) || 3600) * 1000 - 60000; resolve(); } else reject(new Error((r && r.error_description) || 'Sign-in was not completed.')); };
@@ -113,6 +124,6 @@
     return d;
   }
 
-  BL.cloud = { configured: configured, apiConfigured: apiConfigured, signIn: signIn, signInId: () => signIn(null, 'id'), signOut: signOut, isSignedIn: isSignedIn, hasIdToken: hasIdToken, load: load, loadPrev: loadPrev, save: save, api: api, whoAmI: whoAmI, FILE: FILE };
+  BL.cloud = { configured: configured, configProblem: configProblem, apiConfigured: apiConfigured, signIn: signIn, signInId: () => signIn(null, 'id'), signOut: signOut, isSignedIn: isSignedIn, hasIdToken: hasIdToken, load: load, loadPrev: loadPrev, save: save, api: api, whoAmI: whoAmI, FILE: FILE };
   if (typeof module !== 'undefined' && module.exports) module.exports = BL;
 })(typeof window !== 'undefined' ? window : globalThis);

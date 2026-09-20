@@ -8,6 +8,7 @@
 (function (root) {
   'use strict';
   const BL = root.BL = root.BL || {};
+  BL.ver = BL.ver || {}; BL.ver['lib-core'] = 6; // release this file last changed in; app.js checks it
   const fin = Number.isFinite;
 
   /* ---------------------------------------------------------------- utils */
@@ -108,13 +109,13 @@
       const hit = hints.find(h => d.toLowerCase().includes(h.toLowerCase()));
       return (kind === 'dep' ? 'Deposit' : 'Withdrawal') + (hit ? ' (' + hit + ')' : '');
     }
-    return d.replace(/\s+/g, ' ').trim().slice(0, 140);
+    return d.replace(/[A-Za-z0-9]*\*{3,}[A-Za-z0-9]*/g, '').replace(/^[\s:;,\-]+/, '').replace(/\s+/g, ' ').trim().slice(0, 140);
   }
   function instrFromDesc(desc) { return String(desc || '').split('(')[0].trim().split(/\s+/)[0] || ''; }
 
   function parseIBKR(text) {
     const rows = parseCSV(String(text).replace(/^\uFEFF/, '')); const hdr = {};
-    const out = { base: null, from: '', to: '', key: '', label: '', period: '', positions: [], cash: [], nav: NaN, navPrior: NaN, change: {}, twrStmt: NaN, ledger: [], info: {}, sections: {} };
+    const out = { base: null, from: '', to: '', key: '', label: '', period: '', positions: [], cash: [], nav: NaN, navPrior: NaN, change: {}, twrStmt: NaN, ledger: [], info: {}, fx: {}, sections: {} };
     const tradesOrder = [], tradesExec = [];
     for (const r of rows) {
       const sec = r[0], kind = r[1];
@@ -126,10 +127,16 @@
         case 'Account Information': if (o['Field Name'] === 'Base Currency') out.base = (o['Field Value'] || '').trim(); break; // name, account id and address are deliberately ignored
         case 'Net Asset Value':
           if ((o['Asset Class'] || '').trim() === 'Total') { out.nav = num(o['Current Total'] != null ? o['Current Total'] : o['Current Long']); out.navPrior = num(o['Prior Total']); }
+          else if (o['Time Weighted Rate of Return'] != null && fin(num(o['Time Weighted Rate of Return']))) out.twrStmt = num(o['Time Weighted Rate of Return']);
           break;
         case 'Change in NAV':
           if (o['Field Name']) { const k = o['Field Name'].trim(); if (/time weighted/i.test(k)) out.twrStmt = num(o['Field Value']); else out.change[k] = num(o['Field Value']); }
           break;
+        case 'Forex Balances': { // closing exchange rates in the base currency, per one unit of the currency held
+          const c = (o['Description'] || '').trim(), px = num(o['Close Price']);
+          if (/forex/i.test(o['Asset Category'] || '') && /^[A-Z]{3}$/.test(c) && c !== out.base && fin(px) && px > 0) out.fx[c] = px;
+          break;
+        }
         case 'Financial Instrument Information': if (o['Symbol']) out.info[o['Symbol']] = { desc: o['Description'], exch: o['Listing Exch'], type: o['Type'], asset: o['Asset Category'] }; break;
         case 'Open Positions':
           if (o['DataDiscriminator'] && o['DataDiscriminator'] !== 'Summary') break;
@@ -203,7 +210,8 @@
     switch (e.type) {
       case 'buy': return 'Bought ' + qf(q) + ' ' + e.sym + (px != null ? ' at ' + px2(px) + ' ' + e.ccy : '');
       case 'sell': return 'Sold ' + qf(q) + ' ' + e.sym + (px != null ? ' at ' + px2(px) + ' ' + e.ccy : '');
-      case 'fx': return 'Currency conversion ' + e.sym + ' (' + qf(e.qty) + ')';
+      case 'fx': { const pr = String(e.sym || '').split('.'); const b = pr[0], qc = pr[1] || e.ccy; const amt = fin(e.amt) ? Math.abs(e.amt).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '';
+        return e.qty >= 0 ? 'Bought ' + b + ' ' + qf(q) + (amt ? ' with ' + qc + ' ' + amt : '') : 'Sold ' + b + ' ' + qf(q) + (amt ? ' for ' + qc + ' ' + amt : ''); }
       case 'div': return 'Dividend' + (e.sym ? ' from ' + e.sym : '');
       case 'tax': return 'Tax withheld' + (e.sym ? ' on ' + e.sym : '');
       case 'int': return 'Interest';
@@ -327,11 +335,15 @@
       const F = flows.filter(f => f.date > q.date && f.date <= p.date);
       const Fsum = sum(F, f => f.amt); const wF = sum(F, f => f.amt * Math.max(0, Math.min(1, (daysBetween(f.date, p.date) + 1) / L)));
       const verified = inSeg(q.date, p.date); const den = q.nav + wF;
-      const r = (verified && den > 0) ? (p.nav - q.nav - Fsum) / den : NaN;
+      const rDietz = (verified && den > 0) ? (p.nav - q.nav - Fsum) / den : NaN;
+      // When an interval is exactly one statement and that statement reports its own time-weighted return (calculated daily by the broker), prefer it.
+      const sg = segs.find(x => q.date === addDays(x.from, -1) && p.date === x.to);
+      const rStmt = sg && fin(sg.s.twrStmt) && verified ? sg.s.twrStmt / 100 : NaN;
+      const r = fin(rStmt) ? rStmt : rDietz;
       const usable = fin(r);
       if (usable) idx *= (1 + r);
       contrib += Fsum;
-      intervals.push({ from: q.date, to: p.date, days: L, r: usable ? r : NaN, flow: Fsum, verified: verified, navFrom: q.nav, navTo: p.nav });
+      intervals.push({ from: q.date, to: p.date, days: L, r: usable ? r : NaN, rDietz: rDietz, rStmt: rStmt, src: fin(rStmt) ? 'statement' : 'estimate', flow: Fsum, verified: verified, navFrom: q.nav, navTo: p.nav });
       series.push({ date: p.date, nav: p.nav, contrib: contrib, gain: p.nav - contrib, idx: idx, kind: p.kind });
       index.push(idx);
     });
@@ -347,6 +359,8 @@
     const spanDays = pts.length > 1 ? daysBetween(pts[0].date, pts[pts.length - 1].date) : 0; const usedDays = sum(used, i => i.days);
     const totalTwr = idx / 100 - 1; const yrs = usedDays / 365.25;
     const avgLen = used.length ? usedDays / used.length : NaN;
+    // A flow-weighted estimate over long periods behaves like a money-weighted figure, not a time-weighted one. Flag it.
+    const estDays = sum(used.filter(i => i.src === 'estimate'), i => i.days); const coarse = used.some(i => i.src === 'estimate' && i.days > 45);
     let vol = NaN, volBasis = '';
     if (used.length >= 6 && avgLen <= 35 && avgLen >= 20) { vol = sd(used.map(i => i.r)) * Math.sqrt(12); volBasis = 'monthly'; }
     else if (used.length >= 30 && avgLen <= 4) { vol = sd(used.map(i => i.r)) * Math.sqrt(252); volBasis = 'daily'; }
@@ -365,7 +379,7 @@
       years: years, months: months, totalTwr: totalTwr, annualised: yrs > 0.5 ? Math.pow(idx / 100, 1 / yrs) - 1 : NaN, xirr: xirrVal, vol: vol, volBasis: volBasis,
       contributions: last ? last.contrib : NaN, nav: last ? last.nav : NaN, gain: last ? last.gain : NaN, spanDays: spanDays, verifiedDays: usedDays, flows: flows,
       best: used.length ? used.reduce((a, b) => b.r > a.r ? b : a) : null, worst: used.length ? used.reduce((a, b) => b.r < a.r ? b : a) : null,
-      hitRate: used.length ? used.filter(i => i.r > 0).length / used.length : NaN, avgIntervalDays: avgLen, unverified: intervals.filter(i => !i.verified).length };
+      hitRate: used.length ? used.filter(i => i.r > 0).length / used.length : NaN, avgIntervalDays: avgLen, unverified: intervals.filter(i => !i.verified).length, coarse: coarse, reportedCount: used.filter(i => i.src === 'statement').length, estimatedDays: estDays };
   }
   function sd(a) { if (a.length < 2) return NaN; const m = sum(a) / a.length; return Math.sqrt(sum(a, x => (x - m) * (x - m)) / (a.length - 1)); }
   /** Annualised money-weighted return (XIRR). cfs: [{date, amt}] with at least one negative and one positive. */
@@ -401,7 +415,26 @@
     return { points: pts, note: 'Used column "' + h[di] + '" for dates and "' + h[vi] + '" for NAV.' };
   }
 
-  BL.core = { fin: fin, num: num, esc: esc, sum: sum, parseDate: parseDate, parseTime: parseTime, dayNum: dayNum, daysBetween: daysBetween, addDays: addDays, fmtDay: fmtDay, periodLabel: periodLabel, MON3: MON3,
+  /** Where the imported statements stop, how old that is, and which statement to import next. */
+  function trackedThrough(snaps, today) {
+    const ss = (snaps || []).filter(s => s && s.to); if (!ss.length) return null;
+    const last = ss.reduce((a, b) => b.to > a.to ? b : a); const through = last.to; const lastFrom = last.from || last.to;
+    const since = ss.reduce((a, b) => (b.from || b.to) < a ? (b.from || b.to) : a, ss[0].from || ss[0].to);
+    const days = today ? Math.max(0, daysBetween(through, today)) : NaN;
+    let latestTx = ''; ss.forEach(s => (s.ledger || []).forEach(e => { if (e.date && e.date > latestTx) latestTx = e.date; }));
+    const f = /^(\d{4})-(\d{2})-(\d{2})/.exec(lastFrom), t = /^(\d{4})-(\d{2})-(\d{2})/.exec(through);
+    const nextFrom = addDays(through, 1); let nextTo, kind = 'other';
+    if (f && t && f[1] === t[1] && f[2] === t[2] && +f[3] === 1 && +t[3] === lastDayOfMonth(+t[1], +t[2])) { // a whole month: the next month
+      kind = 'monthly'; const y = +t[2] === 12 ? +t[1] + 1 : +t[1], m = +t[2] === 12 ? 1 : +t[2] + 1; nextTo = isoOf(y, m, lastDayOfMonth(y, m));
+    } else if (f && t && f[1] === t[1] && f[2] === '01' && f[3] === '01' && t[2] === '12' && t[3] === '31') { kind = 'annual'; nextTo = (+t[1] + 1) + '-12-31'; }
+    else nextTo = addDays(nextFrom, Math.max(0, daysBetween(lastFrom, through)));
+    const status = !fin(days) ? 'unknown' : days <= 35 ? 'current' : days <= 70 ? 'due' : 'overdue';
+    const nl = periodLabel(nextFrom, nextTo); const desc = kind === 'annual' ? 'the ' + nl + ' annual statement' : kind === 'monthly' ? 'the ' + nl + ' monthly statement' : 'a statement for ' + nl;
+    return { through: through, since: since, days: days, status: status, latestTx: latestTx, kind: kind, next: { from: nextFrom, to: nextTo, label: nl, desc: desc } };
+  }
+  function agoText(d) { return !fin(d) ? '' : d === 0 ? 'today' : d === 1 ? '1 day ago' : d + ' days ago'; }
+
+  BL.core = { trackedThrough: trackedThrough, agoText: agoText, fin: fin, num: num, esc: esc, sum: sum, parseDate: parseDate, parseTime: parseTime, dayNum: dayNum, daysBetween: daysBetween, addDays: addDays, fmtDay: fmtDay, periodLabel: periodLabel, MON3: MON3,
     csvCell: csvCell, safeUrl: safeUrl, cleanJson: cleanJson, parseCSV: parseCSV, isIBKR: isIBKR, parseIBKR: parseIBKR, scrubDesc: scrubDesc,
     entryKey: entryKey, combineLedgers: combineLedgers, describeEntry: describeEntry, ledgerSummary: ledgerSummary, makeSnap: makeSnap, checkSnap: checkSnap,
     chooseSegments: chooseSegments, coverage: coverage, performance: performance, xirr: xirr, benchmarkIndex: benchmarkIndex, parseNavSeries: parseNavSeries, sd: sd };

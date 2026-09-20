@@ -1,6 +1,12 @@
 (function(){
 'use strict';
 const BL=window.BL; const CFG=window.BALLAST_CONFIG||{};
+BL.ver=BL.ver||{}; BL.ver.app=6;
+/* Version tracking. Each file records the release it last changed in. If one of them on your site is older than this file expects, Ballast says which. */
+const RELEASE={n:6,date:'2026-09-20'};
+const REQUIRES={'lib-core':6,'cloud':6,'views-history':6,'boot':6};
+function versionRows(){ const v=BL.ver||{}; const rows=[{file:'app.js',have:RELEASE.n,need:RELEASE.n}]; Object.keys(REQUIRES).forEach(k=>rows.push({file:k+'.js',have:v[k]==null?null:v[k],need:REQUIRES[k]})); rows.forEach(r=>{ r.ok=r.have!=null&&r.have>=r.need; }); return rows; }
+function versionProblems(){ return versionRows().filter(r=>!r.ok); }
 const {fin,num,esc,sum,parseCSV,isIBKR,parseIBKR,safeUrl,csvCell,cleanJson}=BL.core;
 
 /* ------------------------------------------------------------------ *
@@ -103,7 +109,7 @@ const flagSvg=on=>'<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="
  * State
  * ------------------------------------------------------------------ */
 function blank(){
-  return {v:2,base:'USD',fx:{},fxImplied:{},positions:[],cash:[],snaps:[],navExtra:[],asOf:'',asOfLabel:'',stmtNav:null,demo:false,
+  return {v:2,base:'USD',fx:{},fxImplied:{},fxSrc:{},positions:[],cash:[],snaps:[],navExtra:[],asOf:'',asOfLabel:'',stmtNav:null,demo:false,
     tg:{regionProfile:'Global market weight',clsProfile:'Growth',region:Object.assign({},REGION_PROFILES['Global market weight']),cls:Object.assign({},CLASS_PROFILES.Growth)},
     watch:[],feed:null,newsManual:[],ai:{},
     src:{custom:[],indices:DEFAULT_INDICES.map(x=>Object.assign({},x)),queries:[],days:7},
@@ -128,13 +134,14 @@ function normalise(b){
   ['positions','cash','watch','newsManual','navExtra'].forEach(k=>{ if(!Array.isArray(b[k])) b[k]=[]; });
   b.navExtra=b.navExtra.filter(x=>x&&fin(x.nav)&&/^\d{4}-\d{2}-\d{2}$/.test(x.date));
   if(!b.set||typeof b.set!=='object') b.set=blank().set;
+  if(!b.fxSrc||typeof b.fxSrc!=='object') b.fxSrc={};
   return b;
 }
 function merge(b,s){
   if(!s||typeof s!=='object'||Array.isArray(s)) return b;
   s=cleanJson(s);
   for(const k of Object.keys(s)){
-    if(['tg','src','set','fx','fxImplied','ai','goal'].includes(k)&&s[k]&&typeof s[k]==='object'&&!Array.isArray(s[k])) b[k]=Object.assign(b[k]||{},s[k]);
+    if(['tg','src','set','fx','fxImplied','fxSrc','ai','goal'].includes(k)&&s[k]&&typeof s[k]==='object'&&!Array.isArray(s[k])) b[k]=Object.assign(b[k]||{},s[k]);
     else if(Array.isArray(b[k])&&!Array.isArray(s[k])) continue;
     else b[k]=s[k];
   }
@@ -158,7 +165,7 @@ function footHtml(){
   const st=persist.status; let line;
   if(persist.mode==='drive') line=st==='saving'||st==='pending'?'Saving to your Google Drive…':st==='error'?'<b class="loss">Could not save to Drive.</b> '+esc(persist.err)+' It will retry on your next change.':st==='blocked'?'<b class="loss">Saving is paused</b> until the problem on the sign-in screen is fixed.':'Saved to your Google Drive'+(persist.pass?', encrypted':'')+'.';
   else line='Saved in this browser only. <button class="link" data-a="go" data-v="data">Set up Drive sync</button>';
-  return line+'<br><span class="muted">Statements are read in your browser and never uploaded.</span>';
+  return line+'<br><span class="muted">Statements are read in your browser and never uploaded.</span><br><span class="muted">Version '+RELEASE.n+' · '+esc(RELEASE.date)+(versionProblems().length?' · <b class="loss">some files are out of date</b>':'')+'</span>';
 }
 function setBadge(){ const f=$('#foot'); if(f) f.innerHTML=footHtml(); }
 
@@ -270,7 +277,8 @@ function buildPosition(raw,info,old){
 }
 function adoptHoldings(r){
   const old={}; state.positions.forEach(p=>{ old[p.id]=p; });
-  if(r.base) { if(r.base!==state.base){ state.fx={}; state.fxImplied={}; } state.base=r.base; }
+  if(r.base) { if(r.base!==state.base){ state.fx={}; state.fxImplied={}; state.fxSrc={}; } state.base=r.base; }
+  Object.keys(r.fx||{}).forEach(c=>setRate(c,r.fx[c],'statement'));
   state.positions=r.positions.filter(p=>p.symbol&&fin(p.qty)).map(p=>buildPosition(p,r.info,old[p.symbol+'|'+p.ccy]));
   state.cash=r.cash; state.asOf=r.key; state.asOfLabel=r.label; state.stmtNav=fin(r.nav)?r.nav:null; state.demo=false;
   solveFx(r.nav);
@@ -281,8 +289,36 @@ function solveFx(target){
   const foreign=Object.keys(amt).filter(c=>c!==state.base&&Math.abs(amt[c])>0);
   if(foreign.length===1&&fin(target)){
     const c=foreign[0]; const rate=(target-(amt[state.base]||0))/amt[c];
-    if(rate>0&&fin(rate)&&!(state.fx[c]>0&&!state.fxImplied[c])){ state.fx[c]=+rate.toPrecision(6); state.fxImplied[c]=true; }
+    if(rate>0&&fin(rate)) setRate(c,rate,'implied');
   }
+}
+/* Exchange rates. state.fx[c] is the value of ONE unit of currency c in the base currency (1 USD = 1.28 SGD gives fx.USD = 1.28).
+ * Where a rate came from is kept in state.fxSrc: manual (typed by you), statement (the statement's own closing rate), market (a live rate),
+ * implied (worked backwards from the statement total). A rate you typed is never replaced automatically. */
+function rateSrc(c){ if(!(state.fx[c]>0)) return ''; return (state.fxSrc&&state.fxSrc[c])||(state.fxImplied[c]?'implied':'manual'); }
+function setRate(c,v,src,force){
+  if(!(v>0)||!fin(v)||c===state.base) return false; const cur=rateSrc(c);
+  if(cur==='manual') return false;
+  if(!force){
+    if(src==='market'&&cur&&!state.set.live) return false;       // statement view: keep the statement's own rates
+    if(src==='statement'&&cur==='market'&&state.set.live) return false;
+    if(src==='implied'&&(cur==='statement'||cur==='market')) return false;
+  }
+  state.fx[c]=+(+v).toPrecision(6); state.fxImplied[c]=true; state.fxSrc[c]=src; return true;
+}
+function rateNote(c){ const s=rateSrc(c); return s==='statement'?' (from your statement)':s==='market'?' (market rate)':s==='implied'?' (worked out from your statement total)':''; }
+/** Live rates through the market data service. It returns units of each currency per 1 USD, so base-per-unit is (base per USD) / (c per USD). */
+async function fetchRates(force){
+  if(!(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken())) throw new Error('Allow market data first (Data & settings, Storage and security).');
+  const used=new Set(state.positions.map(p=>p.ccy).concat(state.cash.map(c=>c.ccy))); used.delete(state.base); const list=Array.from(used).filter(c=>/^[A-Z]{3}$/.test(c));
+  if(!list.length) return 0;
+  const r=await BL.cloud.api('/fx',{currencies:list.concat([state.base])}); const per=r&&r.fx_per_usd;
+  if(!per||!(per[state.base]>0)) throw new Error('The service did not return a rate for '+state.base+'.');
+  let n=0; list.forEach(c=>{ if(per[c]>0&&setRate(c,per[state.base]/per[c],'market',!!force)) n++; });
+  if(n) dirty(); return n;
+}
+async function autoRates(){
+  try{ if(!BL.cloud.apiConfigured()||!BL.cloud.hasIdToken()) return; memo=null; if(!M().missing.length) return; if(await fetchRates(false)){ toast('Exchange rates fetched'); render(true); } }catch(e){}
 }
 function ingest(list){
   list.sort((a,b)=>a.key>b.key?1:a.key<b.key?-1:0);
@@ -329,7 +365,7 @@ function importFeed(o){
   if(!o||typeof o!=='object'||!('quotes' in o||'news' in o||'custom' in o||'indices' in o||'fx_per_usd' in o)) throw new Error('This does not look like a Ballast feed file.');
   o.imported_at=new Date().toISOString(); state.feed=o;
   const per=o.fx_per_usd;
-  if(per&&per[state.base]>0){ for(const c in per){ if(c!==state.base&&per[c]>0){ state.fx[c]=+(per[state.base]/per[c]).toPrecision(6); delete state.fxImplied[c]; } } }
+  if(per&&per[state.base]>0){ for(const c in per){ if(c!==state.base&&per[c]>0) setRate(c,per[state.base]/per[c],'market'); } }
   dirty();
 }
 function newsKey(t){ return String(t||'').toLowerCase().replace(/\W+/g,' ').trim().slice(0,90); }
@@ -439,7 +475,7 @@ const VIEWS=[['overview','Overview'],['holdings','Holdings'],['performance','Per
 function warnings(m){
   const w=[];
   if(state.demo) w.push('<div class="banner info">You are looking at sample data. <button class="link" data-a="clear-demo">Clear it</button> before importing your own statement.</div>');
-  if(m.missing.length) w.push('<div class="banner">No exchange rate for '+esc(m.missing.join(', '))+'. Those holdings are counted at 1:1 with '+esc(state.base)+' until you set a rate. <button class="link" data-a="go" data-v="data">Set rates</button></div>');
+  if(m.missing.length) w.push('<div class="banner"><b>Totals are wrong until exchange rates are set.</b> There is no rate for '+esc(m.missing.join(', '))+', so those holdings are being counted as if 1 unit equalled 1 '+esc(state.base)+'. '+(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken()?'<button class="link" data-a="fx-fetch">Fetch current rates</button> or ':'')+'<button class="link" data-a="go" data-v="data">enter them yourself</button>.</div>');
   const anyLive=m.rows.some(r=>r.live);
   if(fin(state.stmtNav)&&!anyLive&&!state.demo&&m.nav){ const d=Math.abs(m.nav-state.stmtNav)/Math.abs(state.stmtNav); if(d>0.015) w.push('<div class="banner">Holdings plus cash add up to '+money(m.nav)+' but the statement reports '+money(state.stmtNav)+' ('+pct(d*100)+' apart). Usual causes are exchange rates, cash held in a currency the report omits, or accrued interest.</div>'); }
   const g=state.positions.filter(p=>p.auto&&p.cls==='Equity').length;
@@ -472,7 +508,7 @@ function vOverview(){
   const top=m.rows.slice().sort((a,b)=>b.val-a.val).slice(0,8).map(r=>({label:r.symbol,v:r.w,color:r.flag?'var(--flag)':null}));
   const scaleNote=ui.dim==='region'?'Equities only, with global and broad emerging funds split by their approximate look-through weights.':ui.dim==='sector'?'Equities only.':'';
   return warnings(m)+
-  '<section class="sec"><div class="nav-val">'+money(m.nav)+'</div><div class="sub" style="margin-top:4px">'+(state.asOfLabel?'Statement '+esc(state.asOfLabel):'Manual entry')+(m.rows.some(r=>r.live)?', prices updated from your feed':'')+'</div>'+
+  '<section class="sec"><div class="nav-val">'+money(m.nav)+'</div><div class="sub" style="margin-top:4px">'+trackedSub()+(m.rows.some(r=>r.live)?', prices updated from your feed':'')+'</div>'+
     (monthLine?'<div style="margin-top:4px">'+monthLine+'</div>':'')+
     '<div class="stats"><div><span class="lab">Invested</span><b>'+money(m.inv)+'</b></div><div><span class="lab">Cash</span><b>'+money(m.cashV)+'</b></div>'+
     '<div><span class="lab">Unrealized gain</span><b class="'+cls(pnl)+'">'+smoney(pnl)+(cost>0?' ('+spct(pnl/cost*100)+')':'')+'</b></div><div><span class="lab">Positions</span><b>'+m.rows.length+'</b></div></div></section>'+
@@ -695,9 +731,9 @@ function vData(){
     '<label>Daily move alert (%)<input class="in" type="number" min="1" max="50" value="'+st.move+'" data-c="set" data-k="move"></label>'+
     '<label>Rebalance tolerance (points)<input class="in" type="number" min="1" max="30" value="'+st.tol+'" data-c="set" data-k="tol"></label>'+
     '<label>Theme<select class="in" data-c="theme"><option value="auto"'+(st.theme==='auto'?' selected':'')+'>Match device</option><option value="light"'+(st.theme==='light'?' selected':'')+'>Light</option><option value="dark"'+(st.theme==='dark'?' selected':'')+'>Dark</option></select></label></div>'+
-    '<h3 style="font-size:14.5px;margin:20px 0 4px">Exchange rates</h3><p class="sub" style="margin-bottom:10px">Value of one unit of each currency in '+esc(state.base)+'. Ballast fills these in from your statement or your feed when it can.</p>'+
-    (cur.size?'<div class="form">'+Array.from(cur).map(c=>'<label>1 '+esc(c)+' in '+esc(state.base)+(state.fxImplied[c]?' (implied from statement)':'')+'<input class="in" inputmode="decimal" value="'+(state.fx[c]||'')+'" placeholder="required" data-c="fx" data-k="'+esc(c)+'"></label>').join('')+'</div>':'<p class="sub">All your holdings are in '+esc(state.base)+'.</p>')+'</section>'+
-  backupSection()+storageSection();
+    '<h3 style="font-size:14.5px;margin:20px 0 4px">Exchange rates</h3><p class="sub" style="margin-bottom:10px">Value of one unit of each currency in '+esc(state.base)+'. Ballast uses, in this order: a rate you type, the rate in your statement, then market rates. '+(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken()?'<button class="link" data-a="fx-fetch">Fetch current market rates</button>':'')+'</p>'+
+    (cur.size?'<div class="form">'+Array.from(cur).map(c=>'<label>1 '+esc(c)+' in '+esc(state.base)+rateNote(c)+'<input class="in" inputmode="decimal" value="'+(state.fx[c]||'')+'" placeholder="required" data-c="fx" data-k="'+esc(c)+'"></label>').join('')+'</div>':'<p class="sub">All your holdings are in '+esc(state.base)+'.</p>')+'</section>'+
+  backupSection()+storageSection()+aboutSection();
 }
 
 /* ------------------------------------------------------------------ *
@@ -711,6 +747,7 @@ function showGate(kind,msg){
   else if(kind==='signin') g.innerHTML=box('<p>Sign in with Google to load your data from your own Drive. Nothing is stored on the site itself.</p>'+(msg?'<p class="loss">'+esc(msg)+'</p>':'')+'<div class="row"><button class="btn" data-a="gate-signin">Sign in with Google</button><button class="btn ghost" data-a="gate-local">Use in this browser only</button></div>');
   else if(kind==='unlock') g.innerHTML=box('<p>Your data in Drive is encrypted. Enter your passphrase to open it. It is never sent anywhere or stored.</p><label class="sub" style="display:block;margin:8px 0">Passphrase<input class="in" id="gate-pass" type="password" autocomplete="current-password" style="width:100%;margin-top:4px"></label>'+(msg?'<p class="loss">'+esc(msg)+'</p>':'')+'<div class="row"><button class="btn" data-a="gate-unlock">Unlock</button><button class="btn ghost" data-a="sign-out">Sign out</button></div>');
   else if(kind==='error') g.innerHTML=box('<p class="loss">'+esc(msg||'Something went wrong.')+'</p><p class="sub">Nothing was changed in Drive. Saving is paused so a problem here cannot overwrite your data.</p><div class="row"><button class="btn" data-a="gate-retry">Try again</button><button class="btn ghost" data-a="gate-local">Use in this browser only</button></div>');
+  else if(kind==='version') g.innerHTML=box('<p><b>Some Ballast files on your site are out of date.</b></p><p class="sub" style="margin-bottom:8px">This page is running a mix of old and new files, which can cause wrong numbers or missing screens.</p><table class="t"><thead><tr><th>File</th><th class="num">On your site</th><th class="num">Needed</th></tr></thead><tbody>'+msg.map(r=>'<tr><td>js/'+esc(r.file)+'</td><td class="num loss">'+(r.have==null?'not found or old':esc(r.have))+'</td><td class="num">'+esc(r.need)+'</td></tr>').join('')+'</tbody></table><p class="sub" style="margin:10px 0">Replace those files in your repo\'s js folder, wait for GitHub Pages to finish updating, then reload with Ctrl+Shift+R.</p><div class="row"><button class="btn ghost" data-a="ver-continue">Continue anyway</button></div>');
   const f=g.querySelector('input'); if(f) f.focus();
 }
 function hideGate(){ const g=$('#gate'); if(g){ g.hidden=true; g.innerHTML=''; } }
@@ -762,8 +799,14 @@ function statementsSection(){
     return '<tr><td>'+esc(s.label)+'</td><td class="muted">'+esc(per)+'</td><td class="num">'+money(s.nav)+'</td><td class="num">'+(s.n==null?'–':s.n)+'</td><td class="num">'+(s.ledger||[]).length+'</td><td>'+(warn.length?'<span class="tag flag" title="'+esc(warn.map(w=>w.msg).join(' '))+'">Check</span> <span class="sub">'+esc(warn[0].msg.slice(0,70))+(warn[0].msg.length>70?'…':'')+'</span>':'<span class="gain">OK</span>')+'</td><td class="num"><button class="btn ghost sm" data-a="snap-del" data-k="'+esc(s.from+'|'+s.to)+'">Remove</button></td></tr>';
   }).join('');
   const nav=state.navExtra.length?'<p class="sub" style="margin-top:8px">'+state.navExtra.length+' extra net asset value points imported from files. <button class="link" data-a="nav-clear">Remove them</button></p>':'';
-  return '<section class="sec"><div class="sec-head"><h2>Statements imported</h2>'+(cov.first?'<span class="sub">Covers '+esc(BL.core.fmtDay(cov.first))+' to '+esc(BL.core.fmtDay(cov.last))+(cov.gaps.length?', '+cov.gaps.length+' gap'+(cov.gaps.length>1?'s':''):'')+'. <button class="link" data-a="go" data-v="performance">See coverage</button></span>':'')+'</div>'+
+  const tr=tracked();
+  const trackBox=tr&&!state.demo?'<div class="panel" style="margin-bottom:12px"><div class="kv"><span class="muted">Tracked until</span><span><b class="'+(tr.status==='current'?'gain':tr.status==='overdue'?'loss':'')+'"'+(tr.status==='due'?' style="color:var(--flag)"':'')+'>'+esc(BL.core.fmtDay(tr.through))+'</b> <span class="muted">('+esc(BL.core.agoText(tr.days))+')</span></span></div><div class="kv"><span class="muted">Statements start</span><span>'+esc(BL.core.fmtDay(tr.since))+'</span></div>'+(tr.latestTx?'<div class="kv"><span class="muted">Latest transaction</span><span>'+esc(BL.core.fmtDay(tr.latestTx))+'</span></div>':'')+'<div class="kv"><span class="muted">Next to import</span><span>'+(tr.status==='current'?'Nothing due yet. The next one starts ':'The statement starting ')+'<b>'+esc(BL.core.fmtDay(tr.next.from))+'</b> <span class="muted">('+esc(tr.next.desc)+')</span></span></div></div>':'';
+  return '<section class="sec"><div class="sec-head"><h2>Statements imported</h2>'+(cov.first?'<span class="sub">Covers '+esc(BL.core.fmtDay(cov.first))+' to '+esc(BL.core.fmtDay(cov.last))+(cov.gaps.length?', '+cov.gaps.length+' gap'+(cov.gaps.length>1?'s':''):'')+'. <button class="link" data-a="go" data-v="performance">See coverage</button></span>':'')+'</div>'+trackBox+
     (state.snaps.length?'<div class="scroll"><table class="t"><thead><tr><th>Statement</th><th>Period</th><th class="num">Net asset value</th><th class="num">Positions</th><th class="num">Transactions</th><th>Checks</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>':'<p class="sub">None yet.</p>')+nav+'</section>';
+}
+function aboutSection(){
+  const rows=versionRows();
+  return '<section class="sec"><div class="sec-head"><h2>About this copy</h2><span class="sub">Version '+RELEASE.n+', '+esc(RELEASE.date)+'</span></div><div class="scroll"><table class="t"><thead><tr><th>File</th><th class="num">Version found</th><th class="num">Needed</th><th></th></tr></thead><tbody>'+rows.map(r=>'<tr><td>js/'+esc(r.file)+'</td><td class="num">'+(r.have==null?'not found':esc(r.have))+'</td><td class="num">'+esc(r.need)+'</td><td>'+(r.ok?'<span class="gain">OK</span>':'<span class="loss">Out of date, replace it</span>')+'</td></tr>').join('')+'</tbody></table></div><p class="sub" style="margin-top:8px;max-width:78ch">If a row says out of date, replace that file in your repo\'s js folder, wait for GitHub Pages to update (its Actions tab shows a green tick), and reload with Ctrl+Shift+R. The other script files are not tracked here.</p></section>';
 }
 function backupSection(){
   return '<section class="sec"><div class="sec-head"><h2>Backup, export and reset</h2></div><div class="row"><button class="btn ghost" data-a="export-backup-enc">Save encrypted backup</button><button class="btn ghost" data-a="export-backup">Save plain backup</button><button class="btn ghost" data-a="export-csv">Holdings CSV</button><button class="btn ghost" data-a="export-ledger">Transactions CSV</button><button class="btn ghost" data-a="export-nav">NAV history CSV</button><button class="btn ghost" data-a="print">Print or save as PDF</button><button class="btn danger" data-a="wipe">Delete all data</button></div><p class="sub" style="margin-top:8px;max-width:74ch">A plain backup contains your full holdings and history, so keep it somewhere private or use the encrypted one. To restore, drop the file into the import area above.</p></section>';
@@ -819,13 +862,27 @@ async function refreshFeed(){
 function overviewLine(){
   const p=getPerf(); if(p.series.length<2) return ''; const parts=[];
   if(fin(p.gain)&&fin(p.contributions)&&p.contributions>0) parts.push('<span class="'+cls(p.gain)+'">'+smoney(p.gain)+' gain on '+money(p.contributions)+' put in</span>');
-  if(fin(p.totalTwr)&&p.verifiedDays>0) parts.push('<span class="muted">time-weighted return '+spct(p.totalTwr*100)+(fin(p.annualised)?', about '+spct(p.annualised*100)+' a year':'')+'</span>');
+  if(fin(p.totalTwr)&&p.verifiedDays>0) parts.push('<span class="muted">'+(p.coarse?'approximate return ':'time-weighted return ')+spct(p.totalTwr*100)+(fin(p.annualised)?', about '+spct(p.annualised*100)+' a year':'')+'</span>');
   return parts.join(' · ');
+}
+const todayIso=()=>new Date().toISOString().slice(0,10);
+function tracked(){ return state.snaps.length?BL.core.trackedThrough(state.snaps,todayIso()):null; }
+function trackedMeta(){
+  const t=tracked();
+  if(state.demo) return '<span>Sample data</span>';
+  if(!t) return state.asOfLabel?'<span>Statement '+esc(state.asOfLabel)+'</span>':'';
+  const colour=t.status==='current'?'gain':t.status==='overdue'?'loss':''; const style=t.status==='due'?' style="color:var(--flag)"':'';
+  return '<span class="'+colour+'"'+style+' title="The latest activity statement you imported ends on this date. Holdings and history are only as recent as this.">Statements tracked to '+esc(BL.core.fmtDay(t.through))+' ('+esc(BL.core.agoText(t.days))+')</span>';
+}
+function trackedSub(){
+  const t=tracked(); if(state.demo) return 'Sample data';
+  if(!t) return state.asOfLabel?'Statement '+esc(state.asOfLabel):'Manual entry';
+  return 'Statements tracked to '+esc(BL.core.fmtDay(t.through))+', '+esc(BL.core.agoText(t.days));
 }
 function staleNote(){
   if(!state.snaps.length||state.demo) return '';
-  const last=state.snaps[state.snaps.length-1].to; const d=BL.core.daysBetween(last,new Date().toISOString().slice(0,10));
-  return d>=35?'<div class="banner info">Your latest statement ends '+esc(BL.core.fmtDay(last))+' ('+d+' days ago). Import a newer one so holdings and history stay current. <button class="link" data-a="go" data-v="data">Import</button></div>':'';
+  const t=tracked(); if(!t||t.status==='current'||t.status==='unknown') return '';
+  return '<div class="banner '+(t.status==='overdue'?'':'info')+'">Your data is tracked to <b>'+esc(BL.core.fmtDay(t.through))+'</b> ('+t.days+' days ago). To bring it up to date, import the activity statement starting <b>'+esc(BL.core.fmtDay(t.next.from))+'</b> ('+esc(t.next.desc)+'). <button class="link" data-a="go" data-v="data">Import</button></div>';
 }
 async function restorePrev(){
   try{
@@ -837,13 +894,15 @@ async function restorePrev(){
 }
 const EXTRA_ACTIONS={
   tk:el=>{ ui.tk=el.dataset.v; render(); },
+  'ver-continue':()=>{ ui.verIgnored=true; hideGate(); BL.app.boot(); },
+  'fx-fetch':async()=>{ try{ const n=await fetchRates(true); toast(n?'Exchange rates updated':'No rates were returned'); }catch(e){ toast(e.message); } render(true); },
   'gate-signin':async()=>{ try{ showGate('busy','Waiting for Google…'); await BL.cloud.signIn(); await afterSignIn(); }catch(e){ showGate('signin',e.message); } },
   'gate-local':()=>{ persist.mode='local'; persist.blocked=false; state=load(); ledgerMemo=perfMemo=memo=null; hideGate(); applyTheme(); render(); setBadge(); },
   'gate-unlock':()=>unlock(),
   'gate-retry':()=>afterSignIn(),
   'drive-connect':async()=>{ try{ await BL.cloud.signIn(); await afterSignIn(); }catch(e){ toast(e.message); hideGate(); } },
   'sign-out':()=>{ BL.cloud.signOut(); persist.mode='local'; persist.pass=null; persist.blocked=true; state=blank(); ledgerMemo=perfMemo=memo=null; ui.view='overview'; render(); showGate('signin'); },
-  'id-signin':async()=>{ try{ await BL.cloud.signInId(); toast('Market data allowed'); }catch(e){ toast(e.message); } render(true); },
+  'id-signin':async()=>{ try{ await BL.cloud.signInId(); toast('Market data allowed'); autoRates(); }catch(e){ toast(e.message); } render(true); },
   'enc-setup':()=>passDialog(persist.pass?'Change passphrase':'Encrypt your Drive data','Your data file in Drive will be encrypted with this passphrase. It is never stored or sent anywhere. If you lose it, the data cannot be recovered, so keep a plain or encrypted backup too.','enc-go','Encrypt'),
   'enc-go':async()=>{ const p=readNewPass(); if(!p) return; persist.pass=p; closeDlg(); await persistNow(); render(true); toast('Encryption is on'); },
   'enc-remove':()=>openDlg('Turn encryption off?','<p>The file in Drive will be saved as readable text. Anyone who can open your Drive could read it.</p><div class="row" style="margin-top:14px"><button class="btn danger" data-a="enc-remove-go">Turn it off</button><button class="btn ghost" data-a="close">Cancel</button></div>'),
@@ -870,7 +929,7 @@ function render(keepScroll){
   $('#nav').innerHTML=VIEWS.map(v=>'<button data-a="go" data-v="'+v[0]+'"'+(ui.view===v[0]?' aria-current="page"':'')+'>'+v[1]+(v[0]==='news'&&badge?'<span class="pill" title="High-impact or notable headlines on flagged holdings">'+badge+'</span>':'')+'</button>').join('');
   setBadge();
   $('#title').textContent=(VIEWS.find(v=>v[0]===ui.view)||[])[1]||'';
-  $('#meta').innerHTML=(state.asOfLabel?'<span>Statement '+esc(state.asOfLabel)+'</span>':'')+'<span>Base currency '+esc(state.base)+'</span>'+(state.feed?'<span>Feed '+esc(ago(state.feed.generated_at||state.feed.imported_at))+'</span>':'');
+  $('#meta').innerHTML=trackedMeta()+'<span>Base currency '+esc(state.base)+'</span>'+(state.feed?'<span>Feed '+esc(ago(state.feed.generated_at||state.feed.imported_at))+'</span>':'');
   $('#view').innerHTML=VIEW[ui.view]();
   document.title='Ballast: '+$('#title').textContent;
   if(keepScroll) window.scrollTo(0,y);
@@ -939,14 +998,14 @@ async function handleFiles(files){
     let text=''; try{ text=await f.text(); }catch(e){ ui.log.push({ok:false,msg:'Could not read '+f.name}); continue; }
     const r=routeText(f.name,text,ibkr); ui.log.push(r); if(r.ok&&r.view) view=r.view;
   }
-  if(ibkr.length){ ingest(ibkr); ui.view=ibkr.length>1?'performance':'overview'; toast('Imported '+ibkr.length+' statement'+(ibkr.length>1?'s':'')); }
+  if(ibkr.length){ ingest(ibkr); autoRates(); ui.view=ibkr.length>1?'performance':'overview'; toast('Imported '+ibkr.length+' statement'+(ibkr.length>1?'s':'')); }
   else if(view){ ui.view=view; if(view==='markets') ui.mk='prices'; const ok=ui.log.find(l=>l.ok&&l.view===view); toast(ok?ok.msg:'Imported'); }
   render(); window.scrollTo(0,0);
   if(ui.pendingEnc) askRestorePass();
 }
 function handlePaste(text){
   const ibkr=[]; ui.log=[]; const r=routeText('pasted text',text,ibkr); ui.log.push(r);
-  if(ibkr.length){ ingest(ibkr); ui.view='overview'; toast('Statement imported'); } else if(r.ok&&r.view) ui.view=r.view;
+  if(ibkr.length){ ingest(ibkr); autoRates(); ui.view='overview'; toast('Statement imported'); } else if(r.ok&&r.view) ui.view=r.view;
   render();
 }
 
@@ -1128,8 +1187,8 @@ document.addEventListener('change',e=>{
   else if(c==='tg'){ const kind=el.dataset.k; const t=state.tg[kind==='class'?'cls':'region']; t[el.dataset.key]=Math.max(0,num(el.value)||0); if(kind==='class') state.tg.clsProfile='Custom'; else state.tg.regionProfile='Custom'; dirty(); render(true); }
   else if(c==='set'){ const v=num(el.value); if(fin(v)&&v>0){ state.set[el.dataset.k]=v; dirty(); render(true); } }
   else if(c==='theme'){ state.set.theme=el.value; applyTheme(); dirty(); }
-  else if(c==='fx'){ const v=num(el.value); if(v>0){ state.fx[el.dataset.k]=v; delete state.fxImplied[el.dataset.k]; } else delete state.fx[el.dataset.k]; dirty(); render(true); }
-  else if(c==='base'){ const b=el.value.trim().toUpperCase(); if(/^[A-Z]{3}$/.test(b)&&b!==state.base){ state.base=b; state.fx={}; state.fxImplied={}; state.stmtNav=null; dirty(); render(true); toast('Base currency changed. Set your exchange rates below.'); } }
+  else if(c==='fx'){ const v=num(el.value); const k=el.dataset.k; if(v>0){ state.fx[k]=v; delete state.fxImplied[k]; delete state.fxSrc[k]; } else { delete state.fx[k]; delete state.fxImplied[k]; delete state.fxSrc[k]; } dirty(); render(true); }
+  else if(c==='base'){ const b=el.value.trim().toUpperCase(); if(/^[A-Z]{3}$/.test(b)&&b!==state.base){ state.base=b; state.fx={}; state.fxImplied={}; state.fxSrc={}; state.stmtNav=null; dirty(); render(true); toast('Base currency changed. Set your exchange rates below.'); } }
 });
 document.addEventListener('input',e=>{
   const el=e.target; if(!el.dataset.i) return;
@@ -1147,9 +1206,10 @@ document.addEventListener('input',e=>{
  * ------------------------------------------------------------------ */
 BL.app={S:()=>state,ui:ui,M:M,getLedger:getLedger,getPerf:getPerf,fxRate:fxRate,exposure:exposure,calcBuckets:calcBuckets,esc:esc,money:money,smoney:smoney,pct:pct,spct:spct,cls:cls,px:px,qtyFmt:qtyFmt,nf0:nf0,fdate:fdate,ago:ago,empty:empty,hbars:hbars,strip:strip,diverge:diverge,lineChart:lineChart,catColor:catColor,
   toast:toast,openDlg:openDlg,closeDlg:closeDlg,go:go,render:render,dirty:dirty,saveFile:saveFile,ACT:ACT,VIEW:VIEW,TK:TK,isDeriv:isDeriv,findPos:findPos,aiOn:aiOn,allNews:allNews,matchItem:matchItem,sevOf:sevOf,persist:persist,$:$,$$:$$,slug:slug,MINUS:MINUS,yahooGuess:yahooGuess,
-  onboarding:onboarding,warningsNote:staleNote};
+  onboarding:onboarding,warningsNote:staleNote,versionProblems:versionProblems,versionRows:versionRows,RELEASE:RELEASE};
 BL.app.boot=async function(){
   try{ if(window.top!==window.self){ document.body.textContent='For your security Ballast will not run inside another page.'; return; } }catch(e){ document.body.textContent='For your security Ballast will not run inside another page.'; return; }
+  const stale=versionProblems(); if(stale.length&&!ui.verIgnored){ showGate('version',stale); setBadge(); return; }
   applyTheme(); render(); setBadge();
   if(BL.cloud.configured()&&!CFG.PREVIEW) await cloudGate();
 };
