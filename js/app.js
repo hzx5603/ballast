@@ -1,10 +1,10 @@
 (function(){
 'use strict';
 const BL=window.BL; const CFG=window.BALLAST_CONFIG||{};
-BL.ver=BL.ver||{}; BL.ver.app=6;
+BL.ver=BL.ver||{}; BL.ver.app=8;
 /* Version tracking. Each file records the release it last changed in. If one of them on your site is older than this file expects, Ballast says which. */
-const RELEASE={n:6,date:'2026-09-20'};
-const REQUIRES={'lib-core':6,'cloud':6,'views-history':6,'boot':6};
+const RELEASE={n:8,date:'2026-09-20'};
+const REQUIRES={'lib-core':8,'cloud':6,'views-history':8,'boot':6};
 function versionRows(){ const v=BL.ver||{}; const rows=[{file:'app.js',have:RELEASE.n,need:RELEASE.n}]; Object.keys(REQUIRES).forEach(k=>rows.push({file:k+'.js',have:v[k]==null?null:v[k],need:REQUIRES[k]})); rows.forEach(r=>{ r.ok=r.have!=null&&r.have>=r.need; }); return rows; }
 function versionProblems(){ return versionRows().filter(r=>!r.ok); }
 const {fin,num,esc,sum,parseCSV,isIBKR,parseIBKR,safeUrl,csvCell,cleanJson}=BL.core;
@@ -114,7 +114,7 @@ function blank(){
     watch:[],feed:null,newsManual:[],ai:{},
     src:{custom:[],indices:DEFAULT_INDICES.map(x=>Object.assign({},x)),queries:[],days:7},
     goal:{target:'',years:20,monthly:'',ret:6,vol:15,infl:2},bench:'^GSPC',
-    set:{live:true,tol:5,dd:15,conc:10,move:4,theme:'auto',estate:true}};
+    set:{live:true,tol:5,dd:15,conc:10,move:4,theme:'auto',estate:true,keepCopies:true}};
 }
 let state=load();
 function load(){
@@ -295,6 +295,20 @@ function solveFx(target){
 /* Exchange rates. state.fx[c] is the value of ONE unit of currency c in the base currency (1 USD = 1.28 SGD gives fx.USD = 1.28).
  * Where a rate came from is kept in state.fxSrc: manual (typed by you), statement (the statement's own closing rate), market (a live rate),
  * implied (worked backwards from the statement total). A rate you typed is never replaced automatically. */
+/* ---- cleaned statement copies and recalculation ---- */
+function copyStats(){ const stale=state.snaps.filter(s=>(s.pv||1)<BL.core.PARSER_VERSION); return {total:state.snaps.length,withCopy:state.snaps.filter(s=>s.raw).length,stale:stale,staleWithCopy:stale.filter(s=>s.raw).length,staleNoCopy:stale.filter(s=>!s.raw).length}; }
+function recalcFromSaved(){
+  const list=[]; let skipped=0;
+  state.snaps.forEach(s=>{ if(!s.raw){ skipped++; return; } try{ const r=parseIBKR(s.raw); r.raw=s.raw; list.push(r); }catch(e){ skipped++; } });
+  if(!list.length) return {done:0,skipped:skipped};
+  ingest(list); return {done:list.length,skipped:skipped};
+}
+function recalcNote(){
+  if(state.demo||!state.snaps.length) return ''; const c=copyStats(); if(!c.stale.length) return ''; const parts=[];
+  if(c.staleWithCopy) parts.push('Ballast now reads statements more completely (reported returns and exchange rates). <button class="link" data-a="recalc">Recalculate '+c.staleWithCopy+' statement'+(c.staleWithCopy>1?'s':'')+'</button> from the copies it saved.');
+  if(c.staleNoCopy) parts.push(c.staleNoCopy+' statement'+(c.staleNoCopy>1?'s were':' was')+' imported before Ballast kept cleaned copies, so '+(c.staleNoCopy>1?'they are':'it is')+' missing those details. <button class="link" data-a="go" data-v="data">Import '+(c.staleNoCopy>1?'them':'it')+' once more</button>. After that the Recalculate button works without the files.');
+  return '<div class="banner info">'+parts.join(' ')+'</div>';
+}
 function rateSrc(c){ if(!(state.fx[c]>0)) return ''; return (state.fxSrc&&state.fxSrc[c])||(state.fxImplied[c]?'implied':'manual'); }
 function setRate(c,v,src,force){
   if(!(v>0)||!fin(v)||c===state.base) return false; const cur=rateSrc(c);
@@ -482,6 +496,7 @@ function warnings(m){
   if(g) w.push('<div class="banner info">'+g+' equity holding'+(g>1?'s have':' has')+' a region guessed from its currency or exchange (marked ? in Holdings). Review them so your regional mix is right.</div>');
   if(state.feed&&state.feed.generated_at&&(Date.now()-new Date(state.feed.generated_at).getTime())>3*864e5) w.push('<div class="banner info">Your market feed is from '+ago(state.feed.generated_at)+'. Run the scraper again for fresh prices and news.</div>');
   const stale=staleNote(); if(stale) w.push(stale);
+  const rn=recalcNote(); if(rn) w.push(rn);
   return w.join('');
 }
 function onboarding(){
@@ -801,7 +816,9 @@ function statementsSection(){
   const nav=state.navExtra.length?'<p class="sub" style="margin-top:8px">'+state.navExtra.length+' extra net asset value points imported from files. <button class="link" data-a="nav-clear">Remove them</button></p>':'';
   const tr=tracked();
   const trackBox=tr&&!state.demo?'<div class="panel" style="margin-bottom:12px"><div class="kv"><span class="muted">Tracked until</span><span><b class="'+(tr.status==='current'?'gain':tr.status==='overdue'?'loss':'')+'"'+(tr.status==='due'?' style="color:var(--flag)"':'')+'>'+esc(BL.core.fmtDay(tr.through))+'</b> <span class="muted">('+esc(BL.core.agoText(tr.days))+')</span></span></div><div class="kv"><span class="muted">Statements start</span><span>'+esc(BL.core.fmtDay(tr.since))+'</span></div>'+(tr.latestTx?'<div class="kv"><span class="muted">Latest transaction</span><span>'+esc(BL.core.fmtDay(tr.latestTx))+'</span></div>':'')+'<div class="kv"><span class="muted">Next to import</span><span>'+(tr.status==='current'?'Nothing due yet. The next one starts ':'The statement starting ')+'<b>'+esc(BL.core.fmtDay(tr.next.from))+'</b> <span class="muted">('+esc(tr.next.desc)+')</span></span></div></div>':'';
-  return '<section class="sec"><div class="sec-head"><h2>Statements imported</h2>'+(cov.first?'<span class="sub">Covers '+esc(BL.core.fmtDay(cov.first))+' to '+esc(BL.core.fmtDay(cov.last))+(cov.gaps.length?', '+cov.gaps.length+' gap'+(cov.gaps.length>1?'s':''):'')+'. <button class="link" data-a="go" data-v="performance">See coverage</button></span>':'')+'</div>'+trackBox+
+  const cs=copyStats(); const keep=state.set.keepCopies!==false;
+  const copiesBox=state.snaps.length&&!state.demo?'<div class="panel" style="margin-bottom:12px"><div class="row"><button class="btn'+(cs.withCopy?'':' ghost')+' sm" data-a="recalc"'+(cs.withCopy?'':' disabled')+'>Recalculate from saved statements</button><span class="sub">'+cs.withCopy+' of '+cs.total+' statements have a saved cleaned copy.'+(cs.stale.length?' '+cs.stale.length+' were read by an older version.':'')+'</span></div><p class="sub" style="margin-top:8px;max-width:80ch">Ballast keeps a cleaned copy of each statement so it can re-read it when it improves, without asking for the file again. Your name, account number, address and account type are removed, and only the sections Ballast uses are kept. <button class="link" data-a="copies-toggle">'+(keep?'Stop keeping copies':'Start keeping copies again')+'</button> · <button class="link" data-a="copies-delete">Delete saved copies</button></p></div>':'';
+  return '<section class="sec"><div class="sec-head"><h2>Statements imported</h2>'+(cov.first?'<span class="sub">Covers '+esc(BL.core.fmtDay(cov.first))+' to '+esc(BL.core.fmtDay(cov.last))+(cov.gaps.length?', '+cov.gaps.length+' gap'+(cov.gaps.length>1?'s':''):'')+'. <button class="link" data-a="go" data-v="performance">See coverage</button></span>':'')+'</div>'+trackBox+copiesBox+
     (state.snaps.length?'<div class="scroll"><table class="t"><thead><tr><th>Statement</th><th>Period</th><th class="num">Net asset value</th><th class="num">Positions</th><th class="num">Transactions</th><th>Checks</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>':'<p class="sub">None yet.</p>')+nav+'</section>';
 }
 function aboutSection(){
@@ -827,7 +844,7 @@ function storageSection(){
     (api&&!BL.cloud.hasIdToken()?'<button class="btn ghost" data-a="id-signin">Allow market data</button>':'')+
     '</div></div>'+
     '<details style="margin-top:12px"><summary class="sub" style="cursor:pointer">What leaves your browser, and where it goes</summary><div class="sub" style="max-width:78ch;margin-top:8px">'+
-    '<p><b>Your statements</b> are read in this browser. Name, account number and address are not kept. They are never uploaded.</p>'+
+    '<p><b>Your statements</b> are read in this browser and never uploaded. Name, account number and address are not kept. Ballast saves a cleaned copy of each (identity columns blanked, only the sections it uses) so it can recalculate later. You can turn that off or delete the copies in Data &amp; settings.</p>'+
     '<p style="margin-top:6px"><b>Google Drive</b> receives your data file (encrypted if you turn that on). Ballast can only see files it created.</p>'+
     '<p style="margin-top:6px"><b>The market data service</b> receives ticker symbols, the websites you asked it to read, and an identity-only sign-in token. It never receives balances, quantities or statements. Yahoo Finance and Google News see the tickers it looks up.</p>'+
     '<p style="margin-top:6px"><b>The AI buttons</b> send public figures for one ticker, or your allocation percentages (no amounts) when you press them.</p></div></details></section>';
@@ -861,7 +878,10 @@ async function refreshFeed(){
 }
 function overviewLine(){
   const p=getPerf(); if(p.series.length<2) return ''; const parts=[];
-  if(fin(p.gain)&&fin(p.contributions)&&p.contributions>0) parts.push('<span class="'+cls(p.gain)+'">'+smoney(p.gain)+' gain on '+money(p.contributions)+' put in</span>');
+  if(fin(p.gain)&&fin(p.contributions)&&p.contributions>0){
+    const m=M(); const diff=fin(p.nav)&&m.nav?Math.abs(p.nav-m.nav):0;
+    parts.push('<span class="'+cls(p.gain)+'">'+smoney(p.gain)+' gain on '+money(p.contributions)+' put in</span>'+(diff>=1?'<span class="muted"> (worked out from the statement value of '+money(p.nav)+', which includes accrued dividends and interest that are not in the holdings and cash above)</span>':''));
+  }
   if(fin(p.totalTwr)&&p.verifiedDays>0) parts.push('<span class="muted">'+(p.coarse?'approximate return ':'time-weighted return ')+spct(p.totalTwr*100)+(fin(p.annualised)?', about '+spct(p.annualised*100)+' a year':'')+'</span>');
   return parts.join(' · ');
 }
@@ -894,6 +914,10 @@ async function restorePrev(){
 }
 const EXTRA_ACTIONS={
   tk:el=>{ ui.tk=el.dataset.v; render(); },
+  'recalc':()=>{ const r=recalcFromSaved(); toast(r.done?'Recalculated '+r.done+' statement'+(r.done>1?'s':'')+(r.skipped?'. '+r.skipped+' had no saved copy':''):'There are no saved copies to recalculate from. Import the statements once more.'); autoRates(); render(true); },
+  'copies-toggle':()=>{ state.set.keepCopies=state.set.keepCopies===false; dirty(); render(true); },
+  'copies-delete':()=>openDlg('Delete saved statement copies?','<p>Ballast will keep the numbers it already extracted, but it will no longer be able to recalculate from the statements. You would need to import them again to get that back.</p><div class="row" style="margin-top:14px"><button class="btn danger" data-a="copies-delete-go">Delete the copies</button><button class="btn ghost" data-a="close">Cancel</button></div>'),
+  'copies-delete-go':()=>{ state.snaps.forEach(s=>{ s.raw=''; }); closeDlg(); dirty(); render(true); toast('Saved copies deleted'); },
   'ver-continue':()=>{ ui.verIgnored=true; hideGate(); BL.app.boot(); },
   'fx-fetch':async()=>{ try{ const n=await fetchRates(true); toast(n?'Exchange rates updated':'No rates were returned'); }catch(e){ toast(e.message); } render(true); },
   'gate-signin':async()=>{ try{ showGate('busy','Waiting for Google…'); await BL.cloud.signIn(); await afterSignIn(); }catch(e){ showGate('signin',e.message); } },
@@ -981,7 +1005,7 @@ function routeText(name,text,ibkr){
     if(o&&o.v&&Array.isArray(o.positions)){ state=normalise(merge(blank(),o)); dirty(); applyTheme(); return {ok:true,msg:'Restored backup '+name+'.',view:'overview'}; }
     try{ importFeed(o); return {ok:true,msg:'Imported feed '+name+'.',view:'markets'}; }catch(e){ return {ok:false,msg:name+': '+e.message}; }
   }
-  if(isIBKR(t)){ try{ const r=parseIBKR(t); ibkr.push(r); return {ok:true,msg:'Read '+name+': '+(r.label||'statement')+', '+r.positions.length+' positions, '+r.ledger.length+' transactions'+(fin(r.nav)?', net asset value '+nf0.format(r.nav)+' '+(r.base||''):'')+'.',view:'overview'}; }catch(e){ return {ok:false,msg:name+': '+e.message}; } }
+  if(isIBKR(t)){ try{ const r=parseIBKR(t); if(state.set.keepCopies!==false){ try{ r.raw=BL.core.sanitizeIBKR(t); }catch(e){} } ibkr.push(r); return {ok:true,msg:'Read '+name+': '+(r.label||'statement')+', '+r.positions.length+' positions, '+r.ledger.length+' transactions'+(fin(r.nav)?', net asset value '+nf0.format(r.nav)+' '+(r.base||''):'')+'.',view:'overview'}; }catch(e){ return {ok:false,msg:name+': '+e.message}; } }
   if(looksLikeNavSeries(t)){
     try{
       const r=BL.core.parseNavSeries(t); const byDate=new Map(state.navExtra.map(x=>[x.date,x])); r.points.forEach(p=>byDate.set(p.date,{date:p.date,nav:p.nav}));

@@ -8,7 +8,7 @@
 (function (root) {
   'use strict';
   const BL = root.BL = root.BL || {};
-  BL.ver = BL.ver || {}; BL.ver['lib-core'] = 6; // release this file last changed in; app.js checks it
+  BL.ver = BL.ver || {}; BL.ver['lib-core'] = 8; // release this file last changed in; app.js checks it
   const fin = Number.isFinite;
 
   /* ---------------------------------------------------------------- utils */
@@ -110,6 +110,32 @@
       return (kind === 'dep' ? 'Deposit' : 'Withdrawal') + (hit ? ' (' + hit + ')' : '');
     }
     return d.replace(/[A-Za-z0-9]*\*{3,}[A-Za-z0-9]*/g, '').replace(/^[\s:;,\-]+/, '').replace(/\s+/g, ' ').trim().slice(0, 140);
+  }
+  /* ---- cleaned statement copies ---------------------------------------------------------------------------------------------------
+   * Keeps only the sections and columns Ballast reads, with identity columns blanked and free text tidied, so the statement can be re-read later
+   * (for example after an improvement to the parser) without asking for the file again. It is a whitelist: anything not listed is dropped. */
+  const PARSER_VERSION = 2;
+  const KEEP_SECTIONS = new Set(['Statement', 'Account Information', 'Net Asset Value', 'Change in NAV', 'Open Positions', 'Cash Report', 'Forex Balances', 'Trades', 'Deposits & Withdrawals', 'Dividends', 'Withholding Tax', 'Interest', 'Fees', 'Corporate Actions', 'Financial Instrument Information']);
+  const PII_COL = /^(account|acct|address|alias|customer|holder|user|e-?mail|phone|street|city|postal|zip|name)\b/i;
+  const csvQ = v => { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  function sanitizeIBKR(text) {
+    const rows = parseCSV(String(text).replace(/^\uFEFF/, '')); const hdr = {}; const out = [];
+    for (const r of rows) {
+      const sec = r[0], kind = r[1];
+      if (!KEEP_SECTIONS.has(sec) || (kind !== 'Header' && kind !== 'Data')) continue;
+      if (kind === 'Header') { hdr[sec] = r; out.push(r.slice()); continue; }
+      if (sec === 'Statement' && (r[2] || '') !== 'Period') continue;
+      if (sec === 'Account Information' && (r[2] || '') !== 'Base Currency') continue;
+      const h = hdr[sec] || []; const o = r.slice();
+      h.forEach((name, i) => { if (i >= 2 && PII_COL.test(String(name || '').trim())) o[i] = ''; });
+      const di = h.findIndex(x => /^description$/i.test(String(x).trim()));
+      if (di >= 0 && o[di] != null) {
+        if (sec === 'Deposits & Withdrawals') { const ai = h.findIndex(x => /^amount$/i.test(String(x).trim())); o[di] = scrubDesc(num(o[ai]) >= 0 ? 'dep' : 'wd', o[di]); }
+        else o[di] = scrubDesc('x', o[di]);
+      }
+      out.push(o);
+    }
+    return out.map(r => r.map(csvQ).join(',')).join('\n');
   }
   function instrFromDesc(desc) { return String(desc || '').split('(')[0].trim().split(/\s+/)[0] || ''; }
 
@@ -252,7 +278,7 @@
     const c = r.change || {};
     return { key: r.key, from: r.from, to: r.to || r.key, label: r.label, base: r.base || fallbackBase, nav: r.nav,
       navStart: fin(c['Starting Value']) ? c['Starting Value'] : r.navPrior, change: c, twrStmt: r.twrStmt,
-      n: r.positions.length, ledger: r.ledger, sections: Object.keys(r.sections || {}).filter(s => ['Open Positions', 'Trades', 'Deposits & Withdrawals', 'Dividends', 'Cash Report', 'Change in NAV', 'Net Asset Value'].includes(s)) };
+      n: r.positions.length, ledger: r.ledger, raw: r.raw || '', pv: PARSER_VERSION, sections: Object.keys(r.sections || {}).filter(s => ['Open Positions', 'Trades', 'Deposits & Withdrawals', 'Dividends', 'Cash Report', 'Change in NAV', 'Net Asset Value'].includes(s)) };
   }
   /** Sanity checks on an imported statement. Returns list of {level:'ok'|'warn', msg}. */
   function checkSnap(s) {
@@ -434,7 +460,7 @@
   }
   function agoText(d) { return !fin(d) ? '' : d === 0 ? 'today' : d === 1 ? '1 day ago' : d + ' days ago'; }
 
-  BL.core = { trackedThrough: trackedThrough, agoText: agoText, fin: fin, num: num, esc: esc, sum: sum, parseDate: parseDate, parseTime: parseTime, dayNum: dayNum, daysBetween: daysBetween, addDays: addDays, fmtDay: fmtDay, periodLabel: periodLabel, MON3: MON3,
+  BL.core = { sanitizeIBKR: sanitizeIBKR, PARSER_VERSION: PARSER_VERSION, trackedThrough: trackedThrough, agoText: agoText, fin: fin, num: num, esc: esc, sum: sum, parseDate: parseDate, parseTime: parseTime, dayNum: dayNum, daysBetween: daysBetween, addDays: addDays, fmtDay: fmtDay, periodLabel: periodLabel, MON3: MON3,
     csvCell: csvCell, safeUrl: safeUrl, cleanJson: cleanJson, parseCSV: parseCSV, isIBKR: isIBKR, parseIBKR: parseIBKR, scrubDesc: scrubDesc,
     entryKey: entryKey, combineLedgers: combineLedgers, describeEntry: describeEntry, ledgerSummary: ledgerSummary, makeSnap: makeSnap, checkSnap: checkSnap,
     chooseSegments: chooseSegments, coverage: coverage, performance: performance, xirr: xirr, benchmarkIndex: benchmarkIndex, parseNavSeries: parseNavSeries, sd: sd };

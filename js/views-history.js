@@ -1,7 +1,7 @@
 /* Performance and Activity views. Loaded after app.js. */
 (function () {
   'use strict';
-  BL.ver = BL.ver || {}; BL.ver['views-history'] = 6;
+  BL.ver = BL.ver || {}; BL.ver['views-history'] = 8;
   const A = BL.app, C = BL.core, ui = A.ui, esc = A.esc, money = A.money, smoney = A.smoney, spct = A.spct, pct = A.pct, cls = A.cls, fin = Number.isFinite;
   const S = () => A.S(); const lineChart = A.lineChart;
   const today = () => new Date().toISOString().slice(0, 10);
@@ -73,7 +73,7 @@
       }
     }
     const dd = lineChart({ h: 150, label: 'Fall from the previous high', fmt: v => (v * 100).toFixed(0) + '%', zero: true, max: 0, series: [{ name: 'Fall from previous high', color: 'var(--loss)', nodots: true, pts: p.drawdown.filter(x => !cut || x.date >= cut).map(x => ({ d: x.date, v: x.dd })) }] });
-    return (p.coarse ? '<div class="banner">Some of your statements cover long periods and do not report their own return, so the return figures below are approximate. They behave more like a money-weighted return when you add money gradually. Import monthly statements for accurate time-weighted returns.</div>' : '') +
+    return (p.coarse ? '<div class="banner">Some of your statements cover long periods and do not report their own return, so the return figures below are approximate. They behave more like a money-weighted return when you add money gradually. Import monthly statements for accurate time-weighted returns. If your annual statements do report a Time Weighted Rate of Return, use Recalculate in Data &amp; settings, or import them again if it says there is no saved copy: statements imported before version 6 did not keep it.</div>' : '') +
       (p.avgIntervalDays > 60 ? '<div class="banner info">Falls from the previous high are measured only at statement dates. Real falls between them may be larger.</div>' : '') +
       (p.unverified ? '<div class="banner">' + p.unverified + ' period' + (p.unverified > 1 ? 's' : '') + ' between statements could not be verified, so they are left out of the return figures.</div>' : '') +
       '<div class="tiles">' +
