@@ -1,0 +1,1 @@
+BL.app.boot();

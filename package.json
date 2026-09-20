@@ -1,0 +1,10 @@
+{
+  "name": "ballast-pages",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Ballast: a private portfolio companion that runs as a static site.",
+  "scripts": {
+    "test": "node --test tests/test-core.js tests/test-analysis.js tests/test-secure.js tests/test-cloud.js tests/test-worker.mjs && node --test tests/test-scrape.mjs tests/test-ui.js"
+  },
+  "devDependencies": { "jsdom": "^30.0.0", "miniflare": "^4.0.0" }
+}
