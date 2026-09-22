@@ -1,9 +1,9 @@
 (function(){
 'use strict';
 const BL=window.BL; const CFG=window.BALLAST_CONFIG||{};
-BL.ver=BL.ver||{}; BL.ver.app=11;
+BL.ver=BL.ver||{}; BL.ver.app=12;
 /* Version tracking. Each file records the release it last changed in. If one of them on your site is older than this file expects, Ballast says which. */
-const RELEASE={n:11,date:'2026-09-20'};
+const RELEASE={n:12,date:'2026-09-22'};
 const REQUIRES={'lib-core':9,'cloud':6,'views-history':8,'boot':6};
 function versionRows(){ const v=BL.ver||{}; const rows=[{file:'app.js',have:RELEASE.n,need:RELEASE.n}]; Object.keys(REQUIRES).forEach(k=>rows.push({file:k+'.js',have:v[k]==null?null:v[k],need:REQUIRES[k]})); rows.forEach(r=>{ r.ok=r.have!=null&&r.have>=r.need; }); return rows; }
 function versionProblems(){ return versionRows().filter(r=>!r.ok); }
@@ -592,9 +592,36 @@ function vHoldings(){
     '<span class="sub">Select a row to edit its tags. Flag a holding to track its news.</span></div><div id="htable">'+holdingsTable()+'</div>';
 }
 
+/* Fundamentals metric catalogue, shared by the Markets Compare tab and Research's compare panel.
+ * Each row: [key in the /fundamentals response, label, format kind, group]. */
+const fmtBig=v=>fin(v)?BL.fa.big(v):'–';
+const fmtNum2=v=>fin(v)?v.toFixed(2):'–';
+const fmtNum0=v=>fin(v)?String(Math.round(v)):'–';
+const fmtPct1=v=>fin(v)?pct(v*100,1):'–';
+const fmtPct2=v=>fin(v)?pct(v*100,2):'–';
+const fmtRaw=v=>(v==null||v==='')?'–':String(v);
+const FUND_FMT={px:px,big:fmtBig,num2:fmtNum2,num0:fmtNum0,pct1:fmtPct1,pct2:fmtPct2,raw:fmtRaw};
+const fundMetricFmt=kind=>FUND_FMT[kind]||fmtRaw;
+const FUND_METRICS=[
+  ['price','Price','px','Valuation'],['fiftyTwoWeekLow','52-week low','px','Valuation'],['fiftyTwoWeekHigh','52-week high','px','Valuation'],
+  ['marketCap','Market cap','big','Valuation'],['enterpriseValue','Enterprise value','big','Valuation'],['trailingPE','P/E (trailing)','num2','Valuation'],
+  ['forwardPE','P/E (forward)','num2','Valuation'],['pegRatio','PEG ratio','num2','Valuation'],['priceToSales','Price / sales','num2','Valuation'],
+  ['priceToBook','Price / book','num2','Valuation'],['evToEbitda','EV / EBITDA','num2','Valuation'],['evToRevenue','EV / revenue','num2','Valuation'],
+  ['grossMargin','Gross margin','pct1','Profitability'],['operatingMargin','Operating margin','pct1','Profitability'],['profitMargin','Net profit margin','pct1','Profitability'],
+  ['roe','Return on equity','pct1','Profitability'],['roa','Return on assets','pct1','Profitability'],
+  ['revenue','Revenue (TTM)','big','Growth'],['revenueGrowth','Revenue growth','pct1','Growth'],['earningsGrowth','Earnings growth','pct1','Growth'],
+  ['debtToEquity','Debt / equity','num2','Financial health'],['currentRatio','Current ratio','num2','Financial health'],['quickRatio','Quick ratio','num2','Financial health'],
+  ['totalCash','Total cash','big','Financial health'],['totalDebt','Total debt','big','Financial health'],['freeCashflow','Free cash flow','big','Financial health'],['operatingCashflow','Operating cash flow','big','Financial health'],
+  ['dividendYield','Dividend yield','pct1','Dividends'],['payoutRatio','Payout ratio','pct1','Dividends'],['exDividendDate','Next ex-dividend date','raw','Dividends'],['nextEarnings','Next earnings date','raw','Dividends'],
+  ['beta','Beta','num2','Trading & risk'],['shortPercentFloat','Short interest (of float)','pct1','Trading & risk'],
+  ['expenseRatio','Fund expense ratio','pct2','Fund (ETFs)'],['yield','Fund SEC yield','pct1','Fund (ETFs)'],['ytdReturn','Fund YTD return','pct1','Fund (ETFs)'],
+  ['targetMean','Analyst target price (mean)','px','Analyst opinions'],['recommendationKey','Analyst consensus','raw','Analyst opinions'],['analystCount','Analyst count','num0','Analyst opinions']
+];
+const CMP_DEFAULT_ON=new Set(['price','marketCap','trailingPE','forwardPE','dividendYield','revenueGrowth','profitMargin','roe','debtToEquity','beta']);
+
 /* Markets */
 function mkTabs(){
-  const t=[['prices','Prices'],['indices','Indices']];
+  const t=[['prices','Prices'],['indices','Indices'],['compare','Compare']];
   ((state.feed&&state.feed.custom)||[]).forEach((c,i)=>t.push(['src'+i,c.name||('Source '+(i+1))]));
   t.push(['sources','Sources and feed']); return t;
 }
@@ -647,9 +674,54 @@ function sourcesTab(){
     '<label class="wide">Extra news searches, one per line (for example: Federal Reserve rate decision)<textarea class="in" id="s-q">'+esc(s.queries.join('\n'))+'</textarea></label>'+
     '<label>Days of news to fetch<input class="in" id="s-days" type="number" min="1" max="30" value="'+s.days+'"></label><button class="btn" data-a="src-save">Save</button></div></details></section>';
 }
+function cmpState(){ return ui.cmp=ui.cmp||{sel:null,met:null,busy:false,data:{},err:{},at:0}; }
+function cmpHoldings(){ return M().rows.filter(r=>!isDeriv(r)&&r.cls!=='Cash'); }
+async function pullComparison(){
+  const c=cmpState(); if(c.busy) return;
+  const list=cmpHoldings().filter(r=>c.sel&&c.sel[r.symbol]);
+  if(!list.length||!(BL.cloud.apiConfigured()&&BL.cloud.hasIdToken())) return;
+  c.busy=true; c.err={}; render(true);
+  await Promise.all(list.map(async r=>{
+    try{ c.data[r.symbol]=await BL.cloud.api('/fundamentals',{symbol:r.yahoo||yahooGuess(r)}); }
+    catch(e){ c.err[r.symbol]=e.message; }
+  }));
+  c.busy=false; c.at=Date.now(); render(true);
+}
+function compareTab(){
+  const c=cmpState(); const list=cmpHoldings();
+  if(!c.sel){ c.sel={}; list.forEach(r=>c.sel[r.symbol]=true); }
+  if(!c.met){ c.met={}; FUND_METRICS.forEach(m=>c.met[m[0]]=CMP_DEFAULT_ON.has(m[0])); }
+  const api=BL.cloud.apiConfigured()&&BL.cloud.hasIdToken();
+  const chosenH=list.filter(r=>c.sel[r.symbol]);
+  const chosenM=FUND_METRICS.filter(m=>c.met[m[0]]);
+  const groups=[]; FUND_METRICS.forEach(m=>{ if(!groups.includes(m[3])) groups.push(m[3]); });
+  const holdBox=list.length?'<div class="chips" style="margin-bottom:10px">'+list.map(r=>'<label class="chip" style="cursor:pointer"><input type="checkbox" data-c="cmp-sel" data-k="'+esc(r.symbol)+'" '+(c.sel[r.symbol]?'checked':'')+' style="margin-right:5px">'+esc(r.symbol)+'</label>').join('')+'</div>':empty('No holdings yet.');
+  const metBox=groups.map(g=>'<fieldset style="border:0;padding:0;margin:0 0 10px"><legend class="sub" style="padding:0;margin-bottom:4px">'+esc(g)+'</legend><div class="chips">'+FUND_METRICS.filter(m=>m[3]===g).map(m=>'<label class="chip" style="cursor:pointer"><input type="checkbox" data-c="cmp-met" data-k="'+m[0]+'" '+(c.met[m[0]]?'checked':'')+' style="margin-right:5px">'+esc(m[1])+'</label>').join('')+'</div></fieldset>').join('');
+  let table='';
+  if(c.at){
+    const cols=chosenH.filter(r=>c.data[r.symbol]||c.err[r.symbol]);
+    if(!cols.length) table=empty('Nothing came back. Press Pull comparison again.');
+    else{
+      const head='<tr><th>Figure</th>'+cols.map(r=>'<th class="num">'+esc(r.symbol)+'<span class="desc">'+esc((c.data[r.symbol]&&c.data[r.symbol].name)||r.desc||'')+'</span></th>').join('')+'</tr>';
+      let body='',lastGrp=null;
+      chosenM.forEach(m=>{
+        if(m[3]!==lastGrp){ body+='<tr><td colspan="'+(cols.length+1)+'" style="font-weight:600;padding-top:12px">'+esc(m[3])+'</td></tr>'; lastGrp=m[3]; }
+        body+='<tr><td>'+esc(m[1])+'</td>'+cols.map(r=>{ const f=c.data[r.symbol]; return f?'<td class="num">'+fundMetricFmt(m[2])(f[m[0]])+'</td>':'<td class="num"><span class="muted" title="'+esc(c.err[r.symbol]||'')+'">error</span></td>'; }).join('')+'</tr>';
+      });
+      table='<div class="scroll"><table class="t"><thead>'+head+'</thead><tbody>'+body+'</tbody></table></div>'+
+        '<p class="sub" style="margin-top:8px">Pulled '+esc(ago(c.at))+' from Yahoo Finance, which is unofficial and can be missing, delayed or wrong for any holding. Nothing here is advice.'+(Object.keys(c.err).length?' No data came back for '+esc(Object.keys(c.err).join(', '))+'.':'')+'</p>';
+    }
+  }
+  return '<p class="sub" style="max-width:78ch">Pick the holdings and figures to line up side by side, then press the button. Nothing is pulled automatically, and every pull counts as a lookup against the market data service.</p>'+
+    '<div class="sec-head"><h2>Holdings</h2><span class="sub">'+chosenH.length+' of '+list.length+' selected</span></div>'+holdBox+
+    '<div class="sec-head"><h2>Figures</h2><span class="sub">'+chosenM.length+' of '+FUND_METRICS.length+' selected</span></div>'+metBox+
+    '<div class="row" style="margin:10px 0 16px">'+(api?'<button class="btn" data-a="cmp-go"'+(c.busy||!chosenH.length||!chosenM.length?' disabled':'')+'>'+(c.busy?'Pulling…':'Pull comparison')+'</button>':'')+'</div>'+
+    (api?'':'<div class="banner info">Comparing figures needs the market data service. <button class="link" data-a="id-signin">Allow market data</button></div>')+
+    table;
+}
 function vMarkets(){
   const tabs=mkTabs(); if(!tabs.some(t=>t[0]===ui.mk)) ui.mk='prices';
-  let body=ui.mk==='prices'?pricesTab():ui.mk==='indices'?indicesTab():ui.mk==='sources'?sourcesTab():customTab(+ui.mk.slice(3));
+  let body=ui.mk==='prices'?pricesTab():ui.mk==='indices'?indicesTab():ui.mk==='compare'?compareTab():ui.mk==='sources'?sourcesTab():customTab(+ui.mk.slice(3));
   return '<div class="tabs" role="tablist">'+tabs.map(t=>'<button role="tab" aria-selected="'+(ui.mk===t[0])+'" data-a="mk" data-v="'+t[0]+'">'+esc(t[1])+'</button>').join('')+'</div>'+body;
 }
 
@@ -1115,7 +1187,7 @@ function loadDemo(){
 /* ------------------------------------------------------------------ *
  * AI features (optional, run through your own market data service)
  * ------------------------------------------------------------------ */
-const aiOn=()=>!!(BL.cloud&&BL.cloud.apiConfigured()&&BL.cloud.isSignedIn());
+const aiOn=()=>!!(BL.cloud&&BL.cloud.apiConfigured()&&BL.cloud.hasIdToken());
 async function aiReview(){
   if(!aiOn()||ui.aiBusy) return;
   const m=M(); if(!m.nav) return;
@@ -1168,6 +1240,7 @@ const ACT={
   demo:()=>loadDemo(),
   'clear-demo':()=>{ state=blank(); dirty(); render(); toast('Sample data cleared'); },
   dim:el=>{ ui.dim=el.dataset.v; render(true); },
+  'cmp-go':()=>pullComparison(),
   sort:el=>{ const k=el.dataset.k; if(ui.sortK===k) ui.sortD*=-1; else { ui.sortK=k; ui.sortD=(k==='symbol'||k==='cls'||k==='region')?1:-1; } $('#htable').innerHTML=holdingsTable(); },
   flag:el=>{ const p=findPos(el.dataset.id); if(!p) return; p.flag=!p.flag; dirty(); render(true); toast(p.symbol+(p.flag?' flagged':' unflagged')); },
   edit:el=>editDialog(el.dataset.id),
@@ -1240,6 +1313,8 @@ document.addEventListener('change',e=>{
   else if(c==='set'){ const v=num(el.value); if(fin(v)&&v>0){ state.set[el.dataset.k]=v; dirty(); render(true); } }
   else if(c==='theme'){ state.set.theme=el.value; applyTheme(); dirty(); }
   else if(c==='fx'){ const v=num(el.value); const k=el.dataset.k; if(v>0){ state.fx[k]=v; delete state.fxImplied[k]; delete state.fxSrc[k]; } else { delete state.fx[k]; delete state.fxImplied[k]; delete state.fxSrc[k]; } dirty(); render(true); }
+  else if(c==='cmp-sel'){ const s=cmpState(); s.sel[el.dataset.k]=el.checked; render(true); }
+  else if(c==='cmp-met'){ const s=cmpState(); s.met[el.dataset.k]=el.checked; render(true); }
   else if(c==='base'){ const b=el.value.trim().toUpperCase(); if(/^[A-Z]{3}$/.test(b)&&b!==state.base){ state.base=b; state.fx={}; state.fxImplied={}; state.fxSrc={}; state.stmtNav=null; state.accr=0; dirty(); render(true); toast('Base currency changed. Set your exchange rates below.'); } }
 });
 document.addEventListener('input',e=>{
@@ -1258,7 +1333,7 @@ document.addEventListener('input',e=>{
  * ------------------------------------------------------------------ */
 BL.app={S:()=>state,ui:ui,M:M,getLedger:getLedger,getPerf:getPerf,fxRate:fxRate,exposure:exposure,calcBuckets:calcBuckets,esc:esc,money:money,smoney:smoney,pct:pct,spct:spct,cls:cls,px:px,qtyFmt:qtyFmt,nf0:nf0,fdate:fdate,ago:ago,empty:empty,hbars:hbars,strip:strip,diverge:diverge,lineChart:lineChart,catColor:catColor,
   toast:toast,openDlg:openDlg,closeDlg:closeDlg,go:go,render:render,dirty:dirty,saveFile:saveFile,ACT:ACT,VIEW:VIEW,TK:TK,isDeriv:isDeriv,findPos:findPos,aiOn:aiOn,allNews:allNews,matchItem:matchItem,sevOf:sevOf,persist:persist,$:$,$$:$$,slug:slug,MINUS:MINUS,yahooGuess:yahooGuess,
-  onboarding:onboarding,warningsNote:staleNote,versionProblems:versionProblems,versionRows:versionRows,RELEASE:RELEASE};
+  onboarding:onboarding,warningsNote:staleNote,versionProblems:versionProblems,versionRows:versionRows,RELEASE:RELEASE,FUND_METRICS:FUND_METRICS,fundMetricFmt:fundMetricFmt};
 BL.app.boot=async function(){
   try{ if(window.top!==window.self){ document.body.textContent='For your security Ballast will not run inside another page.'; return; } }catch(e){ document.body.textContent='For your security Ballast will not run inside another page.'; return; }
   const stale=versionProblems(); if(stale.length&&!ui.verIgnored){ showGate('version',stale); setBadge(); return; }

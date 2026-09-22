@@ -117,6 +117,49 @@
       (f.topHoldings && f.topHoldings.length ? '<div class="sub" style="margin:12px 0 4px">Largest holdings</div><div class="chips">' + f.topHoldings.map(h => '<span class="tag">' + esc(h.symbol || h.name) + (fin(h.weight) ? ' ' + (h.weight * 100).toFixed(1) + '%' : '') + '</span>').join(' ') + '</div>' : '') +
       '<p class="sub" style="margin-top:10px;max-width:80ch">Ratings use generic rules of thumb. Banks, insurers, utilities, property companies and fast-growing firms are normally judged on different measures, so compare with similar companies. Data comes from Yahoo Finance and can be missing or out of date.</p></section>';
   }
+  /* Compare this symbol against a chosen industry benchmark (a sector ETF proxy), the broad market, and up to four
+   * companies the user picks by hand. There is no peer-list data source wired up (Yahoo's unofficial modules used
+   * here do not include one), so "rivals" means whatever tickers the user types in. */
+  const SECTOR_ETF = { Technology: ['XLK', 'Technology sector (XLK)'], 'Financial Services': ['XLF', 'Financials sector (XLF)'], Healthcare: ['XLV', 'Health care sector (XLV)'], 'Consumer Cyclical': ['XLY', 'Consumer discretionary sector (XLY)'], 'Consumer Defensive': ['XLP', 'Consumer staples sector (XLP)'], Industrials: ['XLI', 'Industrials sector (XLI)'], Energy: ['XLE', 'Energy sector (XLE)'], Utilities: ['XLU', 'Utilities sector (XLU)'], 'Basic Materials': ['XLB', 'Materials sector (XLB)'], 'Real Estate': ['XLRE', 'Real estate sector (XLRE)'], 'Communication Services': ['XLC', 'Communication services sector (XLC)'] };
+  const CMP_METRICS = ['price', 'marketCap', 'trailingPE', 'forwardPE', 'pegRatio', 'priceToBook', 'dividendYield', 'revenueGrowth', 'grossMargin', 'profitMargin', 'roe', 'debtToEquity', 'beta'];
+  const cmp = () => rs().cmp = rs().cmp || { input: '', tickers: [], bench: true, spx: false, busy: false, err: '', data: {}, at: 0 };
+  async function oneReturn1y(sym) {
+    try { const h = await api('/history', { symbol: sym, range: '1y', interval: '1d' }); const pts = h.points; if (!pts.length) return null; const c0 = pts[0][4], c1 = pts[pts.length - 1][4]; return fin(c0) && fin(c1) && c0 ? c1 / c0 - 1 : null; } catch (e) { return null; }
+  }
+  async function runCompare(res) {
+    const c = cmp(); if (c.busy) return; const sector = res.fund && res.fund.sector;
+    const targets = [{ sym: res.sym, label: res.sym }].concat(c.tickers.slice(0, 4).map(t => ({ sym: t, label: t })));
+    if (c.bench && sector && SECTOR_ETF[sector]) targets.push({ sym: SECTOR_ETF[sector][0], label: SECTOR_ETF[sector][1] });
+    if (c.spx) targets.push({ sym: '^GSPC', label: 'S&P 500' });
+    c.busy = true; c.err = ''; A.render(true);
+    await Promise.all(targets.map(async t => {
+      const [f, r1] = await Promise.allSettled([api('/fundamentals', { symbol: t.sym }), oneReturn1y(t.sym)]);
+      c.data[t.sym] = { label: t.label, fund: f.status === 'fulfilled' ? f.value : null, ret1y: r1.status === 'fulfilled' ? r1.value : null, err: f.status === 'rejected' ? f.reason.message : null };
+    }));
+    c.busy = false; c.at = Date.now(); A.render(true);
+  }
+  function comparePanel(res) {
+    const c = cmp(); const sector = res.fund && res.fund.sector; const hasBench = sector && SECTOR_ETF[sector];
+    const chips = c.tickers.map((t, i) => '<span class="chip" style="cursor:default">' + esc(t) + ' <button class="link" data-a="rs-cmp-del" data-i="' + i + '" aria-label="Remove ' + esc(t) + '" style="margin-left:2px">×</button></span>').join('');
+    let table = '';
+    if (c.at) {
+      const order = [res.sym].concat(c.tickers.slice(0, 4)).concat(hasBench && c.bench ? [SECTOR_ETF[sector][0]] : []).concat(c.spx ? ['^GSPC'] : []);
+      const cols = order.filter(s => c.data[s]);
+      if (cols.length) {
+        const head = '<tr><th>Figure</th>' + cols.map(s => '<th class="num">' + esc(c.data[s].label) + '</th>').join('') + '</tr>';
+        const rows = [['1-year price return', s => p1(c.data[s].ret1y)]].concat(A.FUND_METRICS.filter(m => CMP_METRICS.includes(m[0])).map(m => [m[1], s => { const f = c.data[s].fund; return f ? A.fundMetricFmt(m[2])(f[m[0]]) : '<span class="muted" title="' + esc(c.data[s].err || '') + '">–</span>'; }]));
+        const body = rows.map(r => '<tr><td>' + esc(r[0]) + '</td>' + cols.map(s => '<td class="num">' + r[1](s) + '</td>').join('') + '</tr>').join('');
+        table = '<div class="scroll"><table class="t"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div><p class="sub" style="margin-top:8px">Pulled ' + esc(A.ago(c.at)) + '. Yahoo Finance is unofficial and figures can be missing, delayed or wrong. Not advice.</p>';
+      } else table = A.empty('Nothing came back.');
+    }
+    return '<section class="sec"><div class="sec-head"><h2>Compare</h2><span class="sub">Against a sector benchmark, the market, or companies you name</span></div>' +
+      '<p class="sub" style="max-width:78ch">There is no reliable free source of "who are the rivals" for a stock, so pick them yourself. The industry option uses a large sector ETF as a stand-in for the whole industry, which is rougher for a narrow sub-industry than for the sector as a whole.</p>' +
+      '<div class="row" style="margin:10px 0"><input class="in" id="rs-cmp-in" placeholder="Add a ticker, for example MSFT" style="width:200px" maxlength="20"><button class="btn ghost sm" data-a="rs-cmp-add">Add</button>' + chips + '</div>' +
+      '<div class="row" style="margin-bottom:10px">' + (hasBench ? '<label class="sub"><input type="checkbox" id="rs-cmp-bench" ' + (c.bench ? 'checked' : '') + '> Include industry (' + esc(SECTOR_ETF[sector][1]) + ')</label>' : '<span class="sub muted">No sector detected for this symbol, so no industry option.</span>') +
+      '<label class="sub" style="margin-left:16px"><input type="checkbox" id="rs-cmp-spx" ' + (c.spx ? 'checked' : '') + '> Include the S&amp;P 500</label></div>' +
+      (c.err ? '<p class="loss" style="margin-bottom:8px">' + esc(c.err) + '</p>' : '') +
+      '<button class="btn" data-a="rs-cmp-go"' + (c.busy ? ' disabled' : '') + '>' + (c.busy ? 'Comparing…' : 'Compare') + '</button>' + table + '</section>';
+  }
   function aiPanel(res) {
     const r = rs(); const a = r.ai; const list = (t, arr) => arr && arr.length ? '<h4>' + t + '</h4><ul>' + arr.slice(0, 5).map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '';
     return '<section class="sec"><div class="sec-head"><h2>Written read</h2><span class="sub">By an AI model, from the figures on this page only</span></div>' +
@@ -138,6 +181,7 @@
         (r.note ? '<div class="banner" style="margin-top:12px">' + esc(r.note) + 'Showing what could be loaded.</div>' : '') +
         (res.bars ? '<div class="row" style="justify-content:space-between;margin:16px 0 6px"><div class="chips" role="group" aria-label="Chart period">' + W.map(w => '<button class="chip" aria-pressed="' + (String(r.win) === w[0]) + '" data-a="rs-win" data-v="' + w[0] + '">' + w[1] + '</button>').join('') + '</div></div>' + (res.tech ? techChart(res, r.win) : '') : '') +
         techPanel(res) + factPanel(res) +
+        (ready() ? comparePanel(res) : '') +
         ((res.news && res.news.length) ? '<section class="sec"><div class="sec-head"><h2>Recent headlines</h2></div>' + res.news.map(n => { const sv = A.sevOf(n); return '<article class="news" style="padding:8px 0"><div>' + (C.safeUrl(n.url) ? '<a href="' + esc(C.safeUrl(n.url)) + '" target="_blank" rel="noopener noreferrer">' + esc(n.title) + '</a>' : esc(n.title)) + '</div><div class="mt">' + (sv ? '<span class="tag ' + sv + '">' + (sv === 'high' ? 'High impact' : 'Worth a look') + '</span>' : '') + '<span>' + esc(n.source || '') + '</span>' + (n.published ? '<span>' + esc(A.ago(n.published)) + '</span>' : '') + '</div></article>'; }).join('') + '</section>' : '') +
         (A.aiOn() || ready() ? aiPanel(res) : '') +
         '<p class="sub" style="margin-top:18px;max-width:80ch">This page describes what the data shows. Indicators are built from past prices and lag them. It is not a forecast, and nothing here is a recommendation to buy, sell or hold. Consider your own goals, costs and taxes, and consult a licensed adviser if unsure.</p></div>';
@@ -256,7 +300,16 @@
       try { const out = await api('/ai', { task: 'analysis', payload: payload }); r.ai = out.result || null; if (!r.ai) r.aiErr = 'No answer came back.'; } catch (e) { r.aiErr = 'Could not write the read: ' + e.message; }
       r.aiBusy = false; A.render(true);
     },
-    'rk-go': () => loadRisk(), 'ev-go': () => loadEvents()
+    'rk-go': () => loadRisk(), 'ev-go': () => loadEvents(),
+    'rs-cmp-add': () => {
+      const r = rs(), c = cmp(), el = $('#rs-cmp-in'); const sym = String((el && el.value) || '').trim().toUpperCase();
+      if (!sym) return; if (!SYM.test(sym)) { c.err = 'Enter a valid symbol.'; A.render(true); return; }
+      if (c.tickers.length >= 4) { c.err = 'Up to four extra tickers at a time.'; A.render(true); return; }
+      if (!c.tickers.includes(sym) && sym !== r.sym) c.tickers.push(sym);
+      c.err = ''; A.render(true);
+    },
+    'rs-cmp-del': el => { cmp().tickers.splice(+el.dataset.i, 1); A.render(true); },
+    'rs-cmp-go': () => { const r = rs(); return r.res ? runCompare(r.res) : undefined; }
   });
   document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target && e.target.id === 'rs-sym') { e.preventDefault(); analyse(e.target.value); } });
   document.addEventListener('change', e => {
@@ -267,7 +320,10 @@
         catch (err) { r.err = err.message; } A.render(true);
       }); el.value = '';
     } else if (el.dataset && el.dataset.vc === 'goal') { const k = el.dataset.k; S().goal[k] = el.value; A.dirty(); A.render(true); }
+    else if (el.id === 'rs-cmp-bench') { cmp().bench = el.checked; }
+    else if (el.id === 'rs-cmp-spx') { cmp().spx = el.checked; }
   });
+  document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target && e.target.id === 'rs-cmp-in') { e.preventDefault(); A.ACT['rs-cmp-add'](); } });
   A.VIEW.research = vResearch;
   A.TK.push(['risk', 'Risk', tkRisk], ['goals', 'Goals', tkGoals], ['events', 'Events', tkEvents], ['tax', 'Tax notes', tkTax]);
 })();
