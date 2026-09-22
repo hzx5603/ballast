@@ -1,9 +1,9 @@
 (function(){
 'use strict';
 const BL=window.BL; const CFG=window.BALLAST_CONFIG||{};
-BL.ver=BL.ver||{}; BL.ver.app=12;
+BL.ver=BL.ver||{}; BL.ver.app=13;
 /* Version tracking. Each file records the release it last changed in. If one of them on your site is older than this file expects, Ballast says which. */
-const RELEASE={n:12,date:'2026-09-22'};
+const RELEASE={n:13,date:'2026-09-22'};
 const REQUIRES={'lib-core':9,'cloud':6,'views-history':8,'boot':6};
 function versionRows(){ const v=BL.ver||{}; const rows=[{file:'app.js',have:RELEASE.n,need:RELEASE.n}]; Object.keys(REQUIRES).forEach(k=>rows.push({file:k+'.js',have:v[k]==null?null:v[k],need:REQUIRES[k]})); rows.forEach(r=>{ r.ok=r.have!=null&&r.have>=r.need; }); return rows; }
 function versionProblems(){ return versionRows().filter(r=>!r.ok); }
@@ -792,7 +792,9 @@ function stressCalc(){
   const shock=(cl,ccy,val)=>{ const a=cl==='Cash'?0:(s[cl]||0); const f=ccy!==state.base?s.fx:0; return val*(1+a/100)*(1+f/100); };
   m.rows.forEach(r=>{ const v=shock(r.cls,r.ccy,r.val); after+=v; byCls[r.cls]+=v-r.val; });
   m.cash.forEach(c=>{ const v=shock('Cash',c.ccy,c.val); after+=v; byCls.Cash+=v-c.val; });
-  return {before:m.nav,after:after,byCls:byCls};
+  // Accrued dividends and interest are counted in the Overview total, so include them here too (unshocked: they are owed in base currency terms already) so both screens start from the same figure.
+  const accr=fin(m.accr)?m.accr:0;
+  return {before:m.total,after:after+accr,byCls:byCls};
 }
 const TK=[['stress','Stress test',tkStress]];
 function vToolkit(){
